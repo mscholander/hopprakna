@@ -18,6 +18,7 @@
     letter-spacing: -2px; line-height: 1; transition: transform 0.08s ease;
   }
   .count.pop { transform: scale(1.12); }
+  /* Tap-counter button */
   .btn {
     width: 220px; height: 220px; border-radius: 50%;
     border: none; background: #2a2a2a; color: #f0f0f0;
@@ -28,6 +29,27 @@
     outline: none; -webkit-tap-highlight-color: transparent; user-select: none;
   }
   .btn:active { transform: scale(0.94); background: #1e1e1e; }
+  /* Value-input form */
+  .value-form {
+    display: flex; flex-direction: column; align-items: center; gap: 16px; width: 100%; max-width: 320px;
+  }
+  .value-form input[type="number"] {
+    width: 100%; background: #2a2a2a; border: 0.5px solid #333; color: #f0f0f0;
+    border-radius: 12px; padding: 16px 20px; font-size: 48px; font-weight: 500;
+    outline: none; text-align: center; letter-spacing: -1px;
+    -moz-appearance: textfield;
+  }
+  .value-form input[type="number"]::-webkit-inner-spin-button,
+  .value-form input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; }
+  .value-form input[type="number"]:focus { border-color: #555; }
+  .btn-save {
+    width: 100%; padding: 18px; border-radius: 12px;
+    border: none; background: #1a3a2a; color: #6fddaa;
+    font-size: 20px; font-weight: 500; font-family: system-ui, sans-serif;
+    cursor: pointer; transition: background 0.12s;
+    outline: none; -webkit-tap-highlight-color: transparent;
+  }
+  .btn-save:active { background: #1e4a32; }
   .status { font-size: 13px; color: #555; }
   .error { color: #dd6f6f; font-size: 15px; text-align: center; }
 </style>
@@ -36,15 +58,19 @@
 
 <div class="name" id="personName">Laddar...</div>
 <div class="count" id="count">0</div>
-<button class="btn" id="btn" onclick="tap()">
+<button class="btn" id="btn" onclick="tap()" style="display:none">
   <span style="font-size:32px;">+</span>
   <span>REP</span>
 </button>
+<div class="value-form" id="valueForm" style="display:none">
+  <input type="number" id="valueInput" placeholder="0" inputmode="decimal" />
+  <button class="btn-save" onclick="saveValue()">Spara</button>
+</div>
 <div class="status" id="status"></div>
 
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-import { getDatabase, ref, onValue, runTransaction } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+import { getDatabase, ref, onValue, runTransaction, set } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyC0BqFUANMhjmSRmCFH1ucmjFPwpaDSSfo",
@@ -66,6 +92,7 @@ if (!id) {
   document.body.innerHTML = '<div class="error">Ingen person vald. Använd länken från admin-sidan.</div>';
 } else {
   const personRef = ref(db, 'persons/' + id);
+  let personType = 'count';
 
   onValue(personRef, (snap) => {
     const data = snap.val();
@@ -75,6 +102,15 @@ if (!id) {
     }
     document.getElementById('personName').textContent = data.name;
     document.getElementById('count').textContent = data.count || 0;
+    personType = data.type || 'count';
+
+    if (personType === 'value') {
+      document.getElementById('btn').style.display = 'none';
+      document.getElementById('valueForm').style.display = 'flex';
+    } else {
+      document.getElementById('btn').style.display = 'flex';
+      document.getElementById('valueForm').style.display = 'none';
+    }
   });
 
   window.tap = function() {
@@ -87,6 +123,21 @@ if (!id) {
     countEl.classList.add('pop');
     setTimeout(() => countEl.classList.remove('pop'), 80);
   };
+
+  window.saveValue = function() {
+    const input = document.getElementById('valueInput');
+    const val = parseFloat(input.value);
+    if (isNaN(val)) return;
+    set(ref(db, 'persons/' + id + '/count'), val);
+    input.value = '';
+    const status = document.getElementById('status');
+    status.textContent = 'Sparat!';
+    setTimeout(() => status.textContent = '', 2000);
+  };
+
+  document.getElementById('valueInput').addEventListener('keydown', e => {
+    if (e.key === 'Enter') window.saveValue();
+  });
 }
 </script>
 </body>

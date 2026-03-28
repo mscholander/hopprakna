@@ -29,6 +29,15 @@
     outline: none; -webkit-tap-highlight-color: transparent; user-select: none;
   }
   .btn:active { transform: scale(0.94); background: #1e1e1e; }
+  .btn-minus {
+    width: 64px; height: 64px; border-radius: 50%;
+    border: none; background: #2a2a2a; color: #888;
+    font-size: 28px; font-weight: 300; font-family: system-ui, sans-serif;
+    cursor: pointer; display: none; align-items: center; justify-content: center;
+    transition: background 0.12s, transform 0.08s, color 0.12s;
+    outline: none; -webkit-tap-highlight-color: transparent; user-select: none;
+  }
+  .btn-minus:active { transform: scale(0.92); background: #1e1e1e; color: #dd6f6f; }
   /* Value-input form */
   .value-form {
     display: flex; flex-direction: column; align-items: center; gap: 16px; width: 100%; max-width: 320px;
@@ -62,6 +71,7 @@
   <span style="font-size:32px;">+</span>
   <span>REP</span>
 </button>
+<button class="btn-minus" id="btnMinus" onclick="untap()">−</button>
 <div class="value-form" id="valueForm" style="display:none">
   <input type="number" id="valueInput" placeholder="0" inputmode="decimal" />
   <button class="btn-save" onclick="saveValue()">Spara</button>
@@ -106,9 +116,11 @@ if (!id) {
 
     if (personType === 'value') {
       document.getElementById('btn').style.display = 'none';
+      document.getElementById('btnMinus').style.display = 'none';
       document.getElementById('valueForm').style.display = 'flex';
     } else {
       document.getElementById('btn').style.display = 'flex';
+      document.getElementById('btnMinus').style.display = 'flex';
       document.getElementById('valueForm').style.display = 'none';
     }
   });
@@ -122,6 +134,12 @@ if (!id) {
     void countEl.offsetWidth;
     countEl.classList.add('pop');
     setTimeout(() => countEl.classList.remove('pop'), 80);
+  };
+
+  window.untap = function() {
+    runTransaction(ref(db, 'persons/' + id + '/count'), (current) => {
+      return Math.max(0, (current || 0) - 1);
+    });
   };
 
   window.saveValue = function() {

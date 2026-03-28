@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Räknare</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #111; color: #f0f0f0; font-family: system-ui, sans-serif;
+    min-height: 100vh; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 40px; padding: 2rem;
+    touch-action: manipulation;
+  }
+  .name { font-size: 28px; font-weight: 500; color: #f0f0f0; text-align: center; }
+  .count {
+    font-size: 96px; font-weight: 500; color: #f0f0f0;
+    letter-spacing: -2px; line-height: 1; transition: transform 0.08s ease;
+  }
+  .count.pop { transform: scale(1.12); }
+  .btn {
+    width: 220px; height: 220px; border-radius: 50%;
+    border: none; background: #2a2a2a; color: #f0f0f0;
+    font-size: 18px; font-weight: 500; font-family: system-ui, sans-serif;
+    cursor: pointer; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 6px;
+    transition: background 0.12s, transform 0.08s;
+    outline: none; -webkit-tap-highlight-color: transparent; user-select: none;
+  }
+  .btn:active { transform: scale(0.94); background: #1e1e1e; }
+  .status { font-size: 13px; color: #555; }
+  .error { color: #dd6f6f; font-size: 15px; text-align: center; }
+</style>
+</head>
+<body>
+
+<div class="name" id="personName">Laddar...</div>
+<div class="count" id="count">0</div>
+<button class="btn" id="btn" onclick="tap()">
+  <span style="font-size:32px;">+</span>
+  <span>HOPP</span>
+</button>
+<div class="status" id="status"></div>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getDatabase, ref, onValue, runTransaction } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyC0BqFUANMhjmSRmCFH1ucmjFPwpaDSSfo",
+  authDomain: "hopprakna.firebaseapp.com",
+  databaseURL: "https://hopprakna-default-rtdb.europe-west1.firebasedatabase.app",
+  projectId: "hopprakna",
+  storageBucket: "hopprakna.firebasestorage.app",
+  messagingSenderId: "527901014186",
+  appId: "1:527901014186:web:8613e6a52a5cbfd33638d3"
+};
+
+const app = initializeApp(firebaseConfig);
+const db = getDatabase(app);
+
+const params = new URLSearchParams(window.location.search);
+const id = params.get('id');
+
+if (!id) {
+  document.body.innerHTML = '<div class="error">Ingen person vald. Använd länken från admin-sidan.</div>';
+} else {
+  const personRef = ref(db, 'persons/' + id);
+
+  onValue(personRef, (snap) => {
+    const data = snap.val();
+    if (!data) {
+      document.body.innerHTML = '<div class="error">Person hittades inte.</div>';
+      return;
+    }
+    document.getElementById('personName').textContent = data.name;
+    document.getElementById('count').textContent = data.count || 0;
+  });
+
+  window.tap = function() {
+    runTransaction(ref(db, 'persons/' + id + '/count'), (current) => {
+      return (current || 0) + 1;
+    });
+    const countEl = document.getElementById('count');
+    countEl.classList.remove('pop');
+    void countEl.offsetWidth;
+    countEl.classList.add('pop');
+    setTimeout(() => countEl.classList.remove('pop'), 80);
+  };
+}
+</script>
+</body>
+</html>

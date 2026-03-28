@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Resultattavla — Hopptävling</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #0a0a0a; color: #f0f0f0; font-family: system-ui, sans-serif;
+    min-height: 100vh; padding: 3rem 4rem;
+  }
+  header {
+    display: flex; justify-content: space-between; align-items: baseline;
+    margin-bottom: 3rem; border-bottom: 0.5px solid #222; padding-bottom: 1.5rem;
+  }
+  h1 { font-size: 32px; font-weight: 500; }
+  .live { font-size: 13px; color: #4a9; display: flex; align-items: center; gap: 6px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #4a9; animation: pulse 1.5s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+  table { width: 100%; border-collapse: collapse; }
+  thead th {
+    text-align: left; font-size: 13px; font-weight: 400; color: #555;
+    padding: 0 0 12px; border-bottom: 0.5px solid #222;
+  }
+  thead th.right { text-align: right; }
+  tbody tr { border-bottom: 0.5px solid #1a1a1a; transition: background 0.2s; }
+  tbody tr:hover { background: #141414; }
+  td { padding: 18px 0; }
+  .rank { font-size: 18px; color: #444; width: 48px; }
+  .rank.gold { color: #c9a84c; font-weight: 500; }
+  .rank.silver { color: #8a8a8a; font-weight: 500; }
+  .rank.bronze { color: #8a5c3a; font-weight: 500; }
+  .person-name { font-size: 26px; font-weight: 500; }
+  .hops {
+    text-align: right; font-size: 48px; font-weight: 500;
+    letter-spacing: -1px; color: #f0f0f0;
+    transition: color 0.3s;
+  }
+  .hops.updated { color: #6fddaa; }
+  .empty { color: #444; font-size: 18px; padding: 3rem 0; text-align: center; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Hopptävling</h1>
+  <div class="live"><div class="dot"></div>Live</div>
+</header>
+
+<table id="table">
+  <thead>
+    <tr>
+      <th>#</th>
+      <th>Namn</th>
+      <th class="right">Hopp</th>
+    </tr>
+  </thead>
+  <tbody id="tbody">
+    <tr><td colspan="3" class="empty">Väntar på deltagare...</td></tr>
+  </tbody>
+</table>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getDatabase, ref, onValue } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyC0BqFUANMhjmSRmCFH1ucmjFPwpaDSSfo",
+  authDomain: "hopprakna.firebaseapp.com",
+  databaseURL: "https://hopprakna-default-rtdb.europe-west1.firebasedatabase.app",
+  projectId: "hopprakna",
+  storageBucket: "hopprakna.firebasestorage.app",
+  messagingSenderId: "527901014186",
+  appId: "1:527901014186:web:8613e6a52a5cbfd33638d3"
+};
+
+const app = initializeApp(firebaseConfig);
+const db = getDatabase(app);
+
+let prevCounts = {};
+
+onValue(ref(db, 'persons'), (snap) => {
+  const data = snap.val() || {};
+  const sorted = Object.entries(data).sort((a, b) => (b[1].count || 0) - (a[1].count || 0));
+  const tbody = document.getElementById('tbody');
+
+  if (sorted.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="3" class="empty">Väntar på deltagare...</td></tr>';
+    return;
+  }
+
+  const rankClass = ['gold', 'silver', 'bronze'];
+  const rankLabel = ['1', '2', '3'];
+
+  tbody.innerHTML = sorted.map(([id, p], i) => {
+    const count = p.count || 0;
+    const updated = prevCounts[id] !== undefined && prevCounts[id] !== count;
+    const rClass = i < 3 ? rankClass[i] : '';
+    return `
+      <tr>
+        <td class="rank ${rClass}">${i + 1}</td>
+        <td class="person-name">${p.name}</td>
+        <td class="hops${updated ? ' updated' : ''}" id="h_${id}">${count}</td>
+      </tr>`;
+  }).join('');
+
+  sorted.forEach(([id, p]) => { prevCounts[id] = p.count || 0; });
+
+  setTimeout(() => {
+    document.querySelectorAll('.hops.updated').forEach(el => el.classList.remove('updated'));
+  }, 800);
+});
+</script>
+</body>
+</html>

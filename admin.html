@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Admin — Hopptävling</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #111; color: #f0f0f0; font-family: system-ui, sans-serif; padding: 2rem; min-height: 100vh; }
+  h1 { font-size: 22px; font-weight: 500; margin-bottom: 2rem; color: #f0f0f0; }
+  .card { background: #1e1e1e; border-radius: 12px; padding: 1.5rem; margin-bottom: 1.5rem; }
+  label { font-size: 13px; color: #888; display: block; margin-bottom: 6px; }
+  input[type="text"] {
+    width: 100%; background: #2a2a2a; border: 0.5px solid #333; color: #f0f0f0;
+    border-radius: 8px; padding: 10px 14px; font-size: 16px; outline: none;
+  }
+  input[type="text"]:focus { border-color: #555; }
+  .row { display: flex; gap: 10px; margin-bottom: 1rem; }
+  .row input { flex: 1; }
+  button {
+    background: #2a2a2a; border: 0.5px solid #444; color: #f0f0f0;
+    border-radius: 8px; padding: 10px 18px; font-size: 15px; cursor: pointer;
+    transition: background 0.1s;
+  }
+  button:hover { background: #333; }
+  button.primary { background: #1a3a2a; border-color: #2a6a4a; color: #6fddaa; }
+  button.primary:hover { background: #1e4a32; }
+  button.danger { background: #3a1a1a; border-color: #6a2a2a; color: #dd6f6f; }
+  button.danger:hover { background: #4a1e1e; }
+  .person-list { display: flex; flex-direction: column; gap: 8px; }
+  .person-row {
+    display: flex; align-items: center; justify-content: space-between;
+    background: #2a2a2a; border-radius: 8px; padding: 10px 14px;
+  }
+  .person-name { font-size: 15px; }
+  .person-link { font-size: 12px; color: #4a9; word-break: break-all; margin-top: 2px; }
+  .remove-btn { background: none; border: none; color: #666; font-size: 18px; cursor: pointer; padding: 0 4px; }
+  .remove-btn:hover { color: #dd6f6f; }
+  .empty { color: #555; font-size: 14px; padding: 1rem 0; }
+  .section-title { font-size: 13px; color: #888; margin-bottom: 12px; }
+  .links { display: flex; gap: 10px; flex-wrap: wrap; }
+  .link-box { background: #2a2a2a; border-radius: 8px; padding: 10px 14px; flex: 1; min-width: 200px; }
+  .link-box .link-label { font-size: 12px; color: #888; margin-bottom: 4px; }
+  .link-box a { color: #4a9; font-size: 13px; word-break: break-all; }
+  .status { font-size: 13px; color: #6fddaa; margin-top: 8px; min-height: 20px; }
+</style>
+</head>
+<body>
+
+<h1>Admin — Hopptävling</h1>
+
+<div class="card">
+  <div class="section-title">Lägg till deltagare</div>
+  <div class="row">
+    <input type="text" id="nameInput" placeholder="Namn på hopparen" />
+    <button class="primary" onclick="addPerson()">Lägg till</button>
+  </div>
+  <div class="status" id="status"></div>
+</div>
+
+<div class="card">
+  <div class="section-title">Deltagare & funktionärslänkar</div>
+  <div class="person-list" id="personList">
+    <div class="empty">Inga deltagare inlagda än.</div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="section-title">Övriga länkar</div>
+  <div class="links">
+    <div class="link-box">
+      <div class="link-label">Resultattavla (TV)</div>
+      <a id="resultLink" href="tavla.html" target="_blank">tavla.html</a>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <button class="danger" onclick="resetAll()">Nollställ alla hopp</button>
+</div>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getDatabase, ref, set, onValue, remove, update } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyC0BqFUANMhjmSRmCFH1ucmjFPwpaDSSfo",
+  authDomain: "hopprakna.firebaseapp.com",
+  databaseURL: "https://hopprakna-default-rtdb.europe-west1.firebasedatabase.app",
+  projectId: "hopprakna",
+  storageBucket: "hopprakna.firebasestorage.app",
+  messagingSenderId: "527901014186",
+  appId: "1:527901014186:web:8613e6a52a5cbfd33638d3"
+};
+
+const app = initializeApp(firebaseConfig);
+const db = getDatabase(app);
+
+const base = window.location.href.replace('admin.html', '');
+
+document.getElementById('resultLink').href = base + 'tavla.html';
+document.getElementById('resultLink').textContent = base + 'tavla.html';
+
+let persons = {};
+
+onValue(ref(db, 'persons'), (snap) => {
+  persons = snap.val() || {};
+  renderList();
+});
+
+window.addPerson = function() {
+  const input = document.getElementById('nameInput');
+  const name = input.value.trim();
+  if (!name) return;
+  const id = 'p_' + Date.now();
+  set(ref(db, 'persons/' + id), { name, count: 0 });
+  input.value = '';
+  showStatus('Lade till ' + name);
+};
+
+window.removePerson = function(id) {
+  remove(ref(db, 'persons/' + id));
+};
+
+window.resetAll = function() {
+  if (!confirm('Nollställ alla hopp?')) return;
+  const updates = {};
+  Object.keys(persons).forEach(id => { updates['persons/' + id + '/count'] = 0; });
+  update(ref(db), updates);
+  showStatus('Alla hopp nollställda.');
+};
+
+document.getElementById('nameInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter') window.addPerson();
+});
+
+function renderList() {
+  const list = document.getElementById('personList');
+  const keys = Object.keys(persons);
+  if (keys.length === 0) {
+    list.innerHTML = '<div class="empty">Inga deltagare inlagda än.</div>';
+    return;
+  }
+  list.innerHTML = keys.map(id => {
+    const p = persons[id];
+    const link = base + 'raknare.html?id=' + id;
+    return `
+      <div class="person-row">
+        <div>
+          <div class="person-name">${p.name}</div>
+          <div class="person-link">Funktionärslänk: <a href="${link}" target="_blank" style="color:#4a9">${link}</a></div>
+        </div>
+        <button class="remove-btn" onclick="removePerson('${id}')">&times;</button>
+      </div>`;
+  }).join('');
+}
+
+function showStatus(msg) {
+  const el = document.getElementById('status');
+  el.textContent = msg;
+  setTimeout(() => el.textContent = '', 2000);
+}
+</script>
+</body>
+</html>

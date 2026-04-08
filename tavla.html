@@ -34,6 +34,8 @@
   .rank.silver { color: #8a8a8a; font-weight: 500; }
   .rank.bronze { color: #8a5c3a; font-weight: 500; }
   .person-name { font-size: 26px; font-weight: 500; }
+  .bar-wrap { width: 100%; background: #1e1e1e; border-radius: 3px; height: 6px; margin-top: 8px; }
+  .bar { height: 6px; border-radius: 3px; background: #6fddaa; transition: width 0.6s ease; }
   .hops {
     text-align: right; font-size: 48px; font-weight: 500;
     letter-spacing: -1px; color: #f0f0f0;
@@ -95,14 +97,20 @@ onValue(ref(db, 'persons'), (snap) => {
   const rankClass = ['gold', 'silver', 'bronze'];
   const rankLabel = ['1', '2', '3'];
 
+  const max = sorted[0][1].count || 0;
+
   tbody.innerHTML = sorted.map(([id, p], i) => {
     const count = p.count || 0;
     const updated = prevCounts[id] !== undefined && prevCounts[id] !== count;
     const rClass = i < 3 ? rankClass[i] : '';
+    const pct = max > 0 ? (count / max) * 100 : 0;
     return `
       <tr>
         <td class="rank ${rClass}">${i + 1}</td>
-        <td class="person-name">${p.name}</td>
+        <td class="person-name">
+          ${p.name}
+          <div class="bar-wrap"><div class="bar" style="width:${pct}%"></div></div>
+        </td>
         <td class="hops${updated ? ' updated' : ''}" id="h_${id}">${count}</td>
       </tr>`;
   }).join('');

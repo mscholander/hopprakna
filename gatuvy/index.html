@@ -2,25 +2,43 @@
 <html lang="sv">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- "Lägg till på hemskärmen" på iPhone/iPad startar sidan i helskärm utan Safaris adressfält -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Gatuvy">
+<meta name="theme-color" content="#000000">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="manifest" href="manifest.webmanifest">
 <title>Gatuvy – åk genom staden</title>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: #000; color: #eee;
     font: 15px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; overflow: hidden; }
+  :root { --st: env(safe-area-inset-top, 0px); --sb: env(safe-area-inset-bottom, 0px);
+    --sl: env(safe-area-inset-left, 0px); --sr: env(safe-area-inset-right, 0px); }
   canvas#view { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
-  #panel { position: fixed; top: 16px; left: 16px; width: min(380px, calc(100vw - 32px));
-    max-height: calc(100vh - 32px); overflow: auto;
+  /* hidden video that carries the picture into iPhone's native fullscreen player */
+  #fsvideo { position: fixed; width: 2px; height: 2px; left: 0; top: 0; opacity: 0; pointer-events: none; }
+  #hint { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(16px + var(--sb)); z-index: 7;
+    width: min(420px, calc(100vw - 32px)); background: rgba(18,18,22,.94); border: 1px solid #444;
+    border-radius: 12px; padding: 12px 14px; font-size: 13px; display: none; }
+  #hint.show { display: block; } #hint button { margin-top: 8px; }
+  #panel { position: fixed; top: calc(16px + var(--st)); left: calc(16px + var(--sl)); width: min(380px, calc(100vw - 32px - var(--sl) - var(--sr)));
+    max-height: calc(100dvh - 32px - var(--st) - var(--sb)); overflow: auto;
     background: rgba(18,18,22,.88); backdrop-filter: blur(8px); border: 1px solid #333;
     border-radius: 12px; padding: 16px; transition: opacity .4s; z-index: 5; }
   body.collapsed #panel { opacity: 0; pointer-events: none; }
   #min { position: absolute; top: 10px; right: 10px; width: 34px; height: 34px; padding: 0; margin: 0; font-size: 20px; line-height: 1; }
-  #open { position: fixed; top: 14px; left: 14px; width: 44px; height: 44px; padding: 0; margin: 0; z-index: 6;
+  #open { position: fixed; top: calc(14px + var(--st)); left: calc(14px + var(--sl)); width: 44px; height: 44px; padding: 0; margin: 0; z-index: 6;
     border-radius: 50%; background: rgba(18,18,22,.75); border: 1px solid #555; font-size: 20px;
     display: none; transition: opacity .4s; }
-  body.collapsed #open { display: block; }
-  body.idle #open { opacity: 0; } body.idle { cursor: none; }
+  #fs2 { position: fixed; top: calc(14px + var(--st)); right: calc(14px + var(--sr)); width: 44px; height: 44px; padding: 0; margin: 0;
+    z-index: 6; border-radius: 50%; background: rgba(18,18,22,.75); border: 1px solid #555; font-size: 20px; display: none; transition: opacity .4s; }
+  body.collapsed #open, body.collapsed #fs2 { display: block; }
+  body.idle #open, body.idle #fs2 { opacity: 0; } body.idle { cursor: none; }
   h1 { font-size: 18px; margin: 0 0 12px; }
   label { display: block; font-size: 12px; color: #aaa; margin: 10px 0 4px; }
   input, select, button { width: 100%; padding: 9px 10px; border-radius: 8px; border: 1px solid #444;
@@ -31,11 +49,11 @@
   .row { display: flex; gap: 8px; } .row > * { flex: 1; }
   #status { margin-top: 12px; font-size: 13px; color: #bbb; min-height: 1.4em; white-space: pre-line; }
   #status.error { color: #ff8a8a; }
-  #credit { position: fixed; right: 10px; bottom: 8px; font-size: 11px; color: #ddd;
+  #credit { position: fixed; right: calc(10px + var(--sr)); bottom: calc(8px + var(--sb)); font-size: 11px; color: #ddd;
     background: rgba(0,0,0,.5); padding: 3px 8px; border-radius: 6px; z-index: 3; max-width: 70vw; }
-  #place { position: fixed; left: 16px; bottom: 150px; font-size: 13px; color: #fff;
+  #place { position: fixed; left: calc(16px + var(--sl)); bottom: calc(150px + var(--sb)); font-size: 13px; color: #fff;
     text-shadow: 0 1px 4px #000; z-index: 3; }
-  canvas#mini { position: fixed; left: 16px; bottom: 16px; width: 180px; height: 126px;
+  canvas#mini { position: fixed; left: calc(16px + var(--sl)); bottom: calc(16px + var(--sb)); width: 180px; height: 126px;
     background: rgba(0,0,0,.45); border-radius: 10px; z-index: 3; }
   .playing-only { display: none; } body.playing .playing-only { display: block; }
   small { color: #888; }
@@ -46,8 +64,11 @@
 <canvas id="mini" class="playing-only" width="360" height="252"></canvas>
 <div id="place" class="playing-only"></div>
 <div id="credit" class="playing-only"></div>
+<video id="fsvideo" muted playsinline webkit-playsinline></video>
+<div id="hint"></div>
 
 <button id="open" title="Visa inställningar" aria-label="Visa inställningar">☰</button>
+<button id="fs2" title="Helskärm" aria-label="Helskärm">⛶</button>
 <div id="panel">
   <button id="min" class="secondary" title="Minimera" aria-label="Minimera panelen">–</button>
   <h1>Gatuvy – åk genom staden</h1>
@@ -418,7 +439,8 @@ function makeTexture(img) {
 }
 // Draw frame a (and b on top with opacity mixv). W = compass direction (deg) the camera looks in.
 function draw(a, b, mixv, za, zb, W) {
-  const w = canvas.clientWidth * Math.min(devicePixelRatio, 2) | 0, h = canvas.clientHeight * Math.min(devicePixelRatio, 2) | 0;
+  let w = canvas.clientWidth * Math.min(devicePixelRatio, 2) | 0, h = canvas.clientHeight * Math.min(devicePixelRatio, 2) | 0;
+  if (vfs.fs) { w = vfs.W; h = vfs.H; }   // iPhone fullscreen video is always landscape 16:9
   if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
   gl.viewport(0, 0, w, h);
   const set = (unit, um, uo, f, z) => { gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, f.tex);
@@ -427,6 +449,7 @@ function draw(a, b, mixv, za, zb, W) {
   set(0, U.m0, U.o0, a, za); set(1, U.m1, U.o1, b || a, zb);
   gl.uniform1f(U.mixv, b ? mixv : 0); gl.uniform1f(U.aspect, w / h);
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  if (vfs.ctx) vfsCompose();
 }
 
 // ---------- stabilisation: line the next image up with the current one ----------
@@ -576,7 +599,54 @@ if (new URLSearchParams(location.search).get('token')) localStorage.setItem('mly
 $('token').value = localStorage.getItem('mlyToken') || '';
 $('token').oninput = () => localStorage.setItem('mlyToken', $('token').value.trim());
 $('music').onchange = () => { $('musicUrl').style.display = $('music').value === 'custom' ? '' : 'none'; startMusic(); };
-$('fs').onclick = () => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
+// ---------- fullscreen ----------
+// Desktop, Android and iPad: the normal Fullscreen API. iPhone Safari has no fullscreen for web pages,
+// only for video, so there the picture (with credits and mini map drawn in) is streamed into a hidden
+// <video> that is opened in the native player. Started from the home screen, the page is fullscreen anyway.
+const de = document.documentElement;
+const fsApi = !!(de.requestFullscreen || de.webkitRequestFullscreen) && (document.fullscreenEnabled || document.webkitFullscreenEnabled);
+const standalone = navigator.standalone === true || matchMedia('(display-mode: fullscreen), (display-mode: standalone)').matches;
+const vfs = { fs: false, W: 1280, H: 720, ctx: null };
+function vfsCompose() {
+  const c = vfs.ctx, W = vfs.W, H = vfs.H, cw = canvas.width, ch = canvas.height;
+  const k = Math.max(W / cw, H / ch);   // "cover": crop the on-screen picture to 16:9 if needed
+  c.drawImage(canvas, (cw - W / k) / 2, (ch - H / k) / 2, W / k, H / k, 0, 0, W, H);
+  if (!document.body.classList.contains('playing')) return;
+  const m = $('mini'); c.globalAlpha = .9; c.drawImage(m, 24, H - 24 - 126, 180, 126); c.globalAlpha = 1;
+  c.font = '15px system-ui, sans-serif'; c.fillStyle = '#fff'; c.shadowColor = '#000'; c.shadowBlur = 4;
+  c.fillText($('place').textContent, 24, H - 24 - 126 - 12);
+  c.shadowBlur = 0; c.font = '13px system-ui, sans-serif';
+  const t = $('credit').textContent, tw = c.measureText(t).width;
+  c.fillStyle = 'rgba(0,0,0,.55)'; c.fillRect(W - tw - 30, H - 34, tw + 16, 24);
+  c.fillStyle = '#ddd'; c.fillText(t, W - tw - 22, H - 17);
+}
+function vfsPrepare() { // must run before the tap: iPhone only opens a video that already has a picture
+  if (vfs.ctx || !canvas.captureStream) return;
+  const c = document.createElement('canvas'); c.width = vfs.W; c.height = vfs.H;
+  vfs.ctx = c.getContext('2d'); vfs.ctx.fillRect(0, 0, vfs.W, vfs.H);
+  const v = $('fsvideo'); v.srcObject = c.captureStream(30); v.play().catch(() => {});
+  v.addEventListener('webkitbeginfullscreen', () => { vfs.fs = true; });
+  v.addEventListener('webkitendfullscreen', () => { vfs.fs = false; v.play().catch(() => {}); }); // keep the stream alive
+}
+function hint(html) { $('hint').innerHTML = html + '<button class="secondary" onclick="this.parentNode.classList.remove(\'show\')">OK</button>';
+  $('hint').classList.add('show'); }
+const homeHint = 'Tips: för helskärm utan knapptryck, tryck på <b>Dela</b> (fyrkanten med pilen) i Safari och välj '
+  + '<b>Lägg till på hemskärmen</b>. Starta sedan Gatuvy från ikonen.';
+$('fs').onclick = $('fs2').onclick = () => {
+  if (fsApi) {
+    const fe = document.fullscreenElement || document.webkitFullscreenElement;
+    if (fe) (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+    else (de.requestFullscreen || de.webkitRequestFullscreen).call(de);
+    return;
+  }
+  if (standalone) return hint('Gatuvy körs redan i helskärm från hemskärmen.');
+  const v = $('fsvideo');
+  if (vfs.ctx && v.webkitEnterFullscreen && v.readyState >= 1) {
+    try { v.play().catch(() => {}); v.webkitEnterFullscreen(); return; } catch (e) { console.warn(e); }
+  }
+  hint((document.body.classList.contains('playing') ? 'Helskärm gick inte att starta här. ' : 'Starta resan först, tryck sedan på Helskärm. ') + homeHint);
+};
+if (!fsApi && standalone) { $('fs').style.display = 'none'; $('fs2').remove(); }
 $('stop').onclick = stop;
 
 function startMusic() {
@@ -596,6 +666,7 @@ async function start() {
     localStorage.setItem('mlyToken', $('token').value.trim());
   }
   run++; document.body.classList.remove('playing'); $('go').disabled = true;
+  if (!fsApi && !standalone) vfsPrepare();   // inside the tap, so iPhone allows the video to play
   try {
     status('Söker platser…');
     const a = await geocode(from), b = await geocode(to);

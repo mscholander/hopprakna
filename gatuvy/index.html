@@ -186,9 +186,11 @@ const providers = {
   },
   async mapillary(bbox) {
     const tok = $('token').value.trim();
-    const j = await getJSON('https://graph.mapillary.com/images?limit=2000&fields=id,geometry,compass_angle,is_pano,sequence,thumb_2048_url,thumb_original_url,captured_at,creator'
+    const j = await getJSON('https://graph.mapillary.com/images?limit=2000&fields=id,geometry,compass_angle,computed_compass_angle,is_pano,camera_type,width,height,sequence,thumb_2048_url,thumb_original_url,captured_at,creator'
       + `&bbox=${bbox.join(',')}&access_token=${encodeURIComponent(tok)}`);
-    return (j.data || []).map(f => ({ id: f.id, p: f.geometry.coordinates, az: f.compass_angle, pano: !!f.is_pano,
+    return (j.data || []).map(f => ({ id: f.id, p: f.geometry.coordinates, az: f.computed_compass_angle ?? f.compass_angle,
+      pano: !!f.is_pano || f.camera_type === 'spherical' || f.camera_type === 'equirectangular',
+      portrait: f.height > f.width, fisheye: f.camera_type === 'fisheye',
       seq: f.sequence, sd: f.thumb_2048_url, hd: f.thumb_original_url || f.thumb_2048_url, t: f.captured_at || 0,
       credit: `${(f.creator || {}).username || 'okänd'} · CC BY-SA · Mapillary` }));
   },
@@ -218,7 +220,35 @@ async function fetchImagesAlong(samples, provider, onProgress) {
   return [...byId.values()];
 }
 
+// Which way was the photographer actually moving? Work it out from the neighbouring photos in the
+// same capture run. A camera that points far away from that direction is a side or rear camera.
+function markForwardFacing(images) {
+  const bySeq = new Map();
+  for (const im of images) (bySeq.get(im.seq) || bySeq.set(im.seq, []).get(im.seq)).push(im);
+  for (const list of bySeq.values()) {
+    list.sort((a, b) => a.t - b.t);
+    for (let i = 0; i < list.length; i++) {
+      const im = list[i];
+      // look 1-3 photos back and ahead so tiny GPS jitter does not decide the direction
+      let a = null, b = null;
+      for (let k = 1; k <= 3 && !a; k++) { const c = list[i - k]; if (c && dist(c.p, im.p) > 2) a = c; }
+      for (let k = 1; k <= 3 && !b; k++) { const c = list[i + k]; if (c && dist(c.p, im.p) > 2) b = c; }
+      im.move = (a || b) ? bearing((a || im).p, (b || im).p) : null;
+      im.forward = im.pano || (im.az != null && im.move != null && angDiff(im.az, im.move) <= 25);
+    }
+  }
+}
+
+// Score of a whole capture run for this route: how many route points it can serve looking forward.
+const FLAT_MAX_TURN = 20; // flat photo may look at most this many degrees away from the road
+function usable(im, s) {
+  if (im.portrait || im.fisheye) return false;
+  if (im.pano) return true;
+  return im.forward && angDiff(im.az, s.brg) <= FLAT_MAX_TURN;
+}
+
 function buildFrames(samples, images) {
+  markForwardFacing(images);
   // Spatial grid (~20 m cells) for nearest-image lookups.
   const lat0 = samples[0].p[1], kx = Math.cos(rad(lat0)) * 111320, ky = 111320, CELL = 20;
   const key = (x, y) => x + ':' + y, grid = new Map();
@@ -226,27 +256,44 @@ function buildFrames(samples, images) {
     const k = key(Math.floor(im.p[0] * kx / CELL), Math.floor(im.p[1] * ky / CELL));
     (grid.get(k) || grid.set(k, []).get(k)).push(im);
   }
-  const frames = []; let prev = null, covered = 0;
-  for (const s of samples) {
-    const cx = Math.floor(s.p[0] * kx / CELL), cy = Math.floor(s.p[1] * ky / CELL);
+  const near = s => { const cx = Math.floor(s.p[0] * kx / CELL), cy = Math.floor(s.p[1] * ky / CELL), out = [];
+    for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (const im of grid.get(key(cx + dx, cy + dy)) || [])
+      if (dist(s.p, im.p) <= 14 && usable(im, s)) out.push(im);
+    return out; };
+  const cand = samples.map(near);
+
+  // Is one kind of picture (360° or flat) good enough for the whole route? Then use only that,
+  // so the look of the "camera" never changes along the way.
+  const cov = kind => cand.filter(c => c.some(im => im.pano === kind)).length / samples.length;
+  const covPano = cov(true), covFlat = cov(false);
+  const only = covPano >= 0.8 ? true : covFlat >= 0.8 ? false : covPano >= covFlat + 0.25 ? true : covFlat >= covPano + 0.25 ? false : null;
+
+  // Long runs from the same capture keep light, season and camera height the same.
+  const seqLen = new Map();
+  cand.forEach(c => new Set(c.map(im => im.seq)).forEach(q => seqLen.set(q, (seqLen.get(q) || 0) + 1)));
+
+  const frames = []; let prev = null, covered = 0, runDir = 0;
+  samples.forEach((s, n) => {
     let best = null, bestScore = 1e9;
-    for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (const im of grid.get(key(cx + dx, cy + dy)) || []) {
-      const d = dist(s.p, im.p);
-      if (d > 14) continue;
-      // Flat photos must look roughly in the travel direction; 360° photos can be turned.
-      if (!im.pano && angDiff(im.az, s.brg) > 35) continue;
-      let score = d;
-      if (prev && im.seq !== prev.seq) score += 9;      // stay in the same capture run -> same light/season
-      if (!im.pano) score += 3;                         // prefer 360° (we control the viewing direction)
+    for (const im of cand[n]) {
+      if (only !== null && im.pano !== only) continue;         // one camera kind for the whole trip
+      let score = dist(s.p, im.p);
+      if (!im.pano) score += angDiff(im.az, s.brg) * 0.15;     // the straighter ahead, the better
+      if (prev && im.seq !== prev.seq) score += 15;           // switching capture run = visible jump
+      if (prev && im.pano !== prev.pano) score += 15;         // switching camera kind = bigger jump
+      score -= Math.min(8, (seqLen.get(im.seq) || 0) * 4 / samples.length * 8);
       if (prev && im.id === prev.id) score -= 1;
+      // A run may have been driven the other way (fine for 360°), but it must not change direction under us.
+      if (prev && im.seq === prev.seq && im.id !== prev.id && runDir && Math.sign(im.t - prev.t) !== runDir) score += 20;
       if (score < bestScore) { bestScore = score; best = im; }
     }
-    if (!best) continue;
+    if (!best) return;
     covered++;
-    if (prev && best.id === prev.id) continue;
-    frames.push({ im: best, brg: s.sbrg, cx: 0, cy: 0, p: s.p, d: s.d });
+    if (prev && best.id === prev.id) return;
+    runDir = prev && best.seq === prev.seq ? Math.sign(best.t - prev.t) : 0;
+    frames.push({ im: best, brg: s.sbrg, road: s.brg, cx: 0, cy: 0, p: s.p, d: s.d });
     prev = best;
-  }
+  });
   return { frames, coverage: covered / samples.length };
 }
 
@@ -403,6 +450,7 @@ async function play(frames, routeCoords, label) {
     const nxt = frames[i % frames.length];
     await nxt.loading;
     if (run !== my) return;
+    if (nxt.ok && !nxt.im.pano && nxt.aspect < 1.1) nxt.ok = false; // portrait phone photo: skip
     if (nxt.ok && nxt !== cur) {
       align(cur, nxt);
       $('credit').textContent = '© ' + nxt.im.credit;

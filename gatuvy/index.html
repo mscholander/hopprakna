@@ -1,0 +1,420 @@
+<!doctype html>
+<html lang="sv">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gatuvy – åk genom staden</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #000; color: #eee;
+    font: 15px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; overflow: hidden; }
+  canvas#view { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  #panel { position: fixed; top: 16px; left: 16px; width: min(380px, calc(100vw - 32px));
+    max-height: calc(100vh - 32px); overflow: auto;
+    background: rgba(18,18,22,.88); backdrop-filter: blur(8px); border: 1px solid #333;
+    border-radius: 12px; padding: 16px; transition: opacity .4s; z-index: 5; }
+  #panel.hidden { opacity: 0; pointer-events: none; }
+  h1 { font-size: 18px; margin: 0 0 12px; }
+  label { display: block; font-size: 12px; color: #aaa; margin: 10px 0 4px; }
+  input, select, button { width: 100%; padding: 9px 10px; border-radius: 8px; border: 1px solid #444;
+    background: #1c1c22; color: #eee; font: inherit; }
+  button { cursor: pointer; background: #2b6cff; border-color: #2b6cff; font-weight: 600; margin-top: 14px; }
+  button.secondary { background: #1c1c22; border-color: #444; font-weight: 400; }
+  button:disabled { opacity: .5; cursor: default; }
+  .row { display: flex; gap: 8px; } .row > * { flex: 1; }
+  #status { margin-top: 12px; font-size: 13px; color: #bbb; min-height: 1.4em; white-space: pre-line; }
+  #status.error { color: #ff8a8a; }
+  #credit { position: fixed; right: 10px; bottom: 8px; font-size: 11px; color: #ddd;
+    background: rgba(0,0,0,.5); padding: 3px 8px; border-radius: 6px; z-index: 3; max-width: 70vw; }
+  #place { position: fixed; left: 16px; bottom: 150px; font-size: 13px; color: #fff;
+    text-shadow: 0 1px 4px #000; z-index: 3; }
+  canvas#mini { position: fixed; left: 16px; bottom: 16px; width: 180px; height: 126px;
+    background: rgba(0,0,0,.45); border-radius: 10px; z-index: 3; }
+  .playing-only { display: none; } body.playing .playing-only { display: block; }
+  small { color: #888; }
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+<canvas id="mini" class="playing-only" width="360" height="252"></canvas>
+<div id="place" class="playing-only"></div>
+<div id="credit" class="playing-only"></div>
+
+<div id="panel">
+  <h1>Gatuvy – åk genom staden</h1>
+  <label>Färdig rutt</label>
+  <select id="preset"></select>
+  <label>Start</label>
+  <input id="from" placeholder="Adress eller plats">
+  <label>Mål</label>
+  <input id="to" placeholder="Adress eller plats">
+  <div class="row">
+    <div><label>Bildkälla</label>
+      <select id="provider">
+        <option value="panoramax">Panoramax (öppen, ingen nyckel)</option>
+        <option value="mapillary">Mapillary (kräver token)</option>
+      </select></div>
+    <div><label>Kvalitet</label>
+      <select id="quality"><option value="sd">Normal</option><option value="hd">Hög (tyngre)</option></select></div>
+  </div>
+  <div id="tokenRow" style="display:none">
+    <label>Mapillary access token</label>
+    <input id="token" placeholder="MLY|...">
+  </div>
+  <div class="row">
+    <div><label>Tempo (sek per bild)</label>
+      <select id="tempo"><option>0.5</option><option selected>0.9</option><option>1.5</option><option>2.5</option></select></div>
+    <div><label>Musik</label>
+      <select id="music">
+        <option value="">Ingen</option>
+        <option value="https://ice1.somafm.com/groovesalad-128-mp3">Lounge (SomaFM Groove Salad)</option>
+        <option value="https://ice1.somafm.com/beatblender-128-mp3">Deep house (SomaFM Beat Blender)</option>
+        <option value="https://ice1.somafm.com/lush-128-mp3">Mjuk vokal (SomaFM Lush)</option>
+        <option value="custom">Egen ström-URL…</option>
+      </select></div>
+  </div>
+  <input id="musicUrl" placeholder="https://…/stream.mp3" style="display:none; margin-top:8px">
+  <button id="go">Starta resan</button>
+  <div class="row">
+    <button id="fs" class="secondary">Helskärm</button>
+    <button id="stop" class="secondary">Stopp</button>
+  </div>
+  <div id="status"></div>
+  <small>Rör musen för att visa panelen under uppspelning. Rutten loopar.</small>
+</div>
+<audio id="audio" preload="none"></audio>
+
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const PRESETS = [
+  ['Paris: Louvren → Triumfbågen', 'Musée du Louvre, Paris', 'Arc de Triomphe, Paris'],
+  ['Paris: Notre-Dame → Eiffeltornet', 'Notre-Dame de Paris', 'Tour Eiffel, Paris'],
+  ['Lyon: Bellecour → Part-Dieu', 'Place Bellecour, Lyon', 'Gare de Lyon-Part-Dieu'],
+  ['Nice: Promenade des Anglais', 'Aéroport Nice Côte d\'Azur', 'Place Masséna, Nice'],
+  ['Stockholm: Slussen → Odenplan', 'Slussen, Stockholm', 'Odenplan, Stockholm'],
+];
+PRESETS.forEach((p, i) => $('preset').add(new Option(p[0], i)));
+$('preset').add(new Option('Egen rutt…', -1));
+
+// ---------- geo helpers ----------
+const R = 6371000, rad = d => d * Math.PI / 180, deg = r => r * 180 / Math.PI;
+function dist(a, b) { // metres, equirectangular approximation (fine at city scale)
+  const x = rad(b[0] - a[0]) * Math.cos(rad((a[1] + b[1]) / 2)), y = rad(b[1] - a[1]);
+  return Math.hypot(x, y) * R;
+}
+function bearing(a, b) {
+  const x = rad(b[0] - a[0]) * Math.cos(rad((a[1] + b[1]) / 2)), y = rad(b[1] - a[1]);
+  return (deg(Math.atan2(x, y)) + 360) % 360;
+}
+const angDiff = (a, b) => Math.abs(((a - b + 540) % 360) - 180);
+
+function resample(coords, step) { // -> [{p:[lon,lat], brg, d}]
+  const out = []; let carry = 0, total = 0;
+  for (let i = 0; i < coords.length - 1; i++) {
+    const a = coords[i], b = coords[i + 1], len = dist(a, b);
+    if (len < 0.01) continue;
+    const brg = bearing(a, b);
+    for (let s = carry; s < len; s += step) {
+      const t = s / len;
+      out.push({ p: [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t], brg, d: total + s });
+    }
+    carry = (carry - len) % step; if (carry < 0) carry += step;
+    total += len;
+  }
+  // smooth bearing a little so the camera does not snap in corners
+  for (let i = 0; i < out.length; i++) {
+    let sx = 0, sy = 0;
+    for (let k = -3; k <= 3; k++) { const o = out[Math.min(out.length - 1, Math.max(0, i + k))]; sx += Math.sin(rad(o.brg)); sy += Math.cos(rad(o.brg)); }
+    out[i].sbrg = (deg(Math.atan2(sx, sy)) + 360) % 360;
+  }
+  return out;
+}
+
+// ---------- external services ----------
+async function getJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`${new URL(url).host} svarade ${r.status}`);
+  return r.json();
+}
+async function geocode(q) {
+  const m = q.match(/^\s*(-?\d+(\.\d+)?)\s*,\s*(-?\d+(\.\d+)?)\s*$/); // "lat, lon"
+  if (m) return [parseFloat(m[3]), parseFloat(m[1])];
+  const j = await getJSON('https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(q));
+  if (!j.length) throw new Error(`Hittade inte platsen "${q}"`);
+  return [parseFloat(j[0].lon), parseFloat(j[0].lat)];
+}
+async function route(a, b) {
+  const path = `/route/v1/driving/${a[0]},${a[1]};${b[0]},${b[1]}?overview=full&geometries=geojson`;
+  // Two public OSRM demo servers; fall back to the second if the first is busy.
+  for (const base of ['https://router.project-osrm.org', 'https://routing.openstreetmap.de/routed-car']) {
+    try { const j = await getJSON(base + path); if (j.code === 'Ok') return j.routes[0]; } catch (e) { console.warn(e); }
+  }
+  throw new Error('Kunde inte räkna ut en rutt');
+}
+
+// Image providers: each returns normalised {id, p:[lon,lat], az, pano, seq, sd, hd, credit}
+const providers = {
+  async panoramax(bbox) {
+    const j = await getJSON(`https://api.panoramax.xyz/api/search?limit=3000&bbox=${bbox.join(',')}`);
+    return (j.features || []).map(f => {
+      const pr = f.properties, fov = (pr['pers:interior_orientation'] || {}).field_of_view;
+      return { id: f.id, p: f.geometry.coordinates, az: pr['view:azimuth'], pano: fov === 360,
+        seq: f.collection, sd: f.assets.sd.href, hd: f.assets.hd.href, t: Date.parse(pr.datetime) || 0,
+        credit: `${pr['geovisio:producer'] || 'okänd'} · ${pr.license || ''} · Panoramax` };
+    });
+  },
+  async mapillary(bbox) {
+    const tok = $('token').value.trim();
+    const j = await getJSON('https://graph.mapillary.com/images?limit=2000&fields=id,geometry,compass_angle,is_pano,sequence,thumb_2048_url,thumb_original_url,captured_at,creator'
+      + `&bbox=${bbox.join(',')}&access_token=${encodeURIComponent(tok)}`);
+    return (j.data || []).map(f => ({ id: f.id, p: f.geometry.coordinates, az: f.compass_angle, pano: !!f.is_pano,
+      seq: f.sequence, sd: f.thumb_2048_url, hd: f.thumb_original_url || f.thumb_2048_url, t: f.captured_at || 0,
+      credit: `${(f.creator || {}).username || 'okänd'} · CC BY-SA · Mapillary` }));
+  },
+};
+
+async function fetchImagesAlong(samples, provider, onProgress) {
+  // Split the route into ~150 m chunks and ask for the images inside each chunk's padded bounding box.
+  const chunks = []; let cur = null, startD = 0;
+  for (const s of samples) {
+    if (!cur || s.d - startD > 150) { cur = [1e9, 1e9, -1e9, -1e9]; chunks.push(cur); startD = s.d; }
+    cur[0] = Math.min(cur[0], s.p[0]); cur[1] = Math.min(cur[1], s.p[1]);
+    cur[2] = Math.max(cur[2], s.p[0]); cur[3] = Math.max(cur[3], s.p[1]);
+  }
+  const byId = new Map(); let done = 0, failed = 0, next = 0;
+  async function worker() {
+    while (next < chunks.length) {
+      const c = chunks[next++];
+      const padLat = 20 / 111320, padLon = padLat / Math.cos(rad(c[1]));
+      const bbox = [c[0] - padLon, c[1] - padLat, c[2] + padLon, c[3] + padLat].map(v => v.toFixed(6));
+      try { for (const im of await providers[provider](bbox)) if (im.az != null || im.pano) byId.set(im.id, im); }
+      catch (e) { failed++; console.warn(e); }
+      onProgress(++done, chunks.length);
+    }
+  }
+  await Promise.all(Array.from({ length: 4 }, worker));
+  if (failed === chunks.length) throw new Error('Bildkällan svarade inte (kontrollera token/nätverk)');
+  return [...byId.values()];
+}
+
+function buildFrames(samples, images) {
+  // Spatial grid (~20 m cells) for nearest-image lookups.
+  const lat0 = samples[0].p[1], kx = Math.cos(rad(lat0)) * 111320, ky = 111320, CELL = 20;
+  const key = (x, y) => x + ':' + y, grid = new Map();
+  for (const im of images) {
+    const k = key(Math.floor(im.p[0] * kx / CELL), Math.floor(im.p[1] * ky / CELL));
+    (grid.get(k) || grid.set(k, []).get(k)).push(im);
+  }
+  const frames = []; let prev = null, covered = 0;
+  for (const s of samples) {
+    const cx = Math.floor(s.p[0] * kx / CELL), cy = Math.floor(s.p[1] * ky / CELL);
+    let best = null, bestScore = 1e9;
+    for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (const im of grid.get(key(cx + dx, cy + dy)) || []) {
+      const d = dist(s.p, im.p);
+      if (d > 14) continue;
+      // Flat photos must look roughly in the travel direction; 360° photos can be turned.
+      if (!im.pano && angDiff(im.az, s.brg) > 35) continue;
+      let score = d;
+      if (prev && im.seq !== prev.seq) score += 9;      // stay in the same capture run -> same light/season
+      if (!im.pano) score += 3;                         // prefer 360° (we control the viewing direction)
+      if (prev && im.id === prev.id) score -= 1;
+      if (score < bestScore) { bestScore = score; best = im; }
+    }
+    if (!best) continue;
+    covered++;
+    if (prev && best.id === prev.id) continue;
+    frames.push({ im: best, yaw: best.pano ? rad(s.sbrg - (best.az || 0)) : 0, p: s.p, d: s.d });
+    prev = best;
+  }
+  return { frames, coverage: covered / samples.length };
+}
+
+// ---------- WebGL renderer: cross-fades two images, re-projects 360° panoramas ----------
+const canvas = $('view'), gl = canvas.getContext('webgl2', { antialias: false, alpha: false });
+const VS = `#version 300 es
+in vec2 a; out vec2 v; void main(){ v = a; gl_Position = vec4(a, 0., 1.); }`;
+const FS = `#version 300 es
+precision highp float;
+in vec2 v; out vec4 o;
+uniform sampler2D t0, t1;
+uniform vec4 m0, m1;      // x: isPano, y: yaw, z: zoom, w: image aspect
+uniform float mixv, aspect;
+const float PI = 3.14159265;
+vec3 samp(sampler2D t, vec4 m) {
+  if (m.x > .5) {
+    float f = tan(radians(46.) ) / m.z;                 // ~92° horizontal field of view
+    vec3 d = normalize(vec3(v.x * f, v.y * f / aspect - .06, 1.));
+    float lon = atan(d.x, d.z) + m.y, lat = asin(d.y);
+    return texture(t, vec2(lon / (2. * PI) + .5, .5 - lat / PI)).rgb;
+  }
+  vec2 s = aspect > m.w ? vec2(1., m.w / aspect) : vec2(aspect / m.w, 1.);   // "cover" fit
+  return texture(t, clamp(v * s / m.z * .5 + .5, 0., 1.) * vec2(1., -1.) + vec2(0., 1.)).rgb;
+}
+void main() {
+  vec3 c = mix(samp(t0, m0), samp(t1, m1), mixv);
+  float vig = smoothstep(1.5, .5, length(v));
+  o = vec4(c * mix(.8, 1., vig), 1.);
+}`;
+let prog, U = {};
+function initGL() {
+  if (!gl) throw new Error('Webbläsaren saknar WebGL2');
+  const sh = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; };
+  prog = gl.createProgram();
+  gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS)); gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FS));
+  gl.bindAttribLocation(prog, 0, 'a'); gl.linkProgram(prog); gl.useProgram(prog);
+  gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  for (const n of ['t0', 't1', 'm0', 'm1', 'mixv', 'aspect']) U[n] = gl.getUniformLocation(prog, n);
+  gl.uniform1i(U.t0, 0); gl.uniform1i(U.t1, 1);
+}
+function makeTexture(img) {
+  const max = gl.getParameter(gl.MAX_TEXTURE_SIZE); let src = img;
+  if (img.naturalWidth > max) { // downscale oversized panoramas
+    const c = document.createElement('canvas'); c.width = max; c.height = Math.round(img.naturalHeight * max / img.naturalWidth);
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height); src = c;
+  }
+  const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, src);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return t;
+}
+function draw(a, b, mixv, za, zb) {
+  const w = canvas.clientWidth * Math.min(devicePixelRatio, 2) | 0, h = canvas.clientHeight * Math.min(devicePixelRatio, 2) | 0;
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+  gl.viewport(0, 0, w, h);
+  const set = (unit, u, f, z) => { gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, f.tex);
+    gl.uniform4f(u, f.im.pano ? 1 : 0, f.yaw, z, f.aspect); };
+  set(0, U.m0, a, za); set(1, U.m1, b || a, zb);
+  gl.uniform1f(U.mixv, b ? mixv : 0); gl.uniform1f(U.aspect, w / h);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+}
+
+// ---------- playback ----------
+let run = 0; // increments on every start/stop so stale loops exit
+const AHEAD = 5;
+function loadFrame(f, quality) {
+  if (f.loading) return f.loading;
+  return f.loading = new Promise(res => {
+    const img = new Image(); img.crossOrigin = 'anonymous';
+    img.onload = () => { f.tex = makeTexture(img); f.aspect = img.naturalWidth / img.naturalHeight; f.ok = true; res(); };
+    img.onerror = () => { f.ok = false; res(); };
+    img.src = quality === 'hd' ? f.im.hd : f.im.sd;
+  });
+}
+function freeFrame(f) { if (f.tex) gl.deleteTexture(f.tex); f.tex = null; f.loading = null; }
+
+async function play(frames, routeCoords, label) {
+  const my = ++run, quality = $('quality').value;
+  document.body.classList.add('playing');
+  let i = 0, cur = null;
+  const ZOOM = 0.07; // gentle push-in per step fakes forward motion
+  while (run === my) {
+    for (let k = 0; k < AHEAD; k++) loadFrame(frames[(i + k) % frames.length], quality);
+    const nxt = frames[i % frames.length];
+    await nxt.loading;
+    if (run !== my) return;
+    if (nxt.ok) {
+      $('credit').textContent = '© ' + nxt.im.credit;
+      $('place').textContent = label;
+      drawMini(routeCoords, nxt.p);
+      const dur = parseFloat($('tempo').value) * 1000, t0 = performance.now();
+      await new Promise(done => {
+        (function tick(now) {
+          if (run !== my) return done();
+          const t = Math.min(1, (now - t0) / dur), e = t * t * (3 - 2 * t);
+          if (cur) draw(cur, nxt, e, 1 + ZOOM + ZOOM * t, 1 + ZOOM * t); else draw(nxt, null, 0, 1 + ZOOM * t, 1);
+          t < 1 ? requestAnimationFrame(tick) : done();
+        })(t0);
+      });
+      if (cur && cur !== nxt) freeFrame(cur);
+      cur = nxt;
+    }
+    i++;
+    if (i % frames.length === 0 && frames.length > AHEAD) await new Promise(r => setTimeout(r, 800)); // loop
+  }
+}
+function stop() { run++; document.body.classList.remove('playing'); $('audio').pause(); showPanel(true); }
+
+function drawMini(coords, pos) {
+  const c = $('mini'), g = c.getContext('2d'), W = c.width, H = c.height, pad = 18;
+  let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9; const k = Math.cos(rad(coords[0][1]));
+  for (const p of coords) { x0 = Math.min(x0, p[0] * k); x1 = Math.max(x1, p[0] * k); y0 = Math.min(y0, p[1]); y1 = Math.max(y1, p[1]); }
+  const s = Math.min((W - 2 * pad) / (x1 - x0 || 1), (H - 2 * pad) / (y1 - y0 || 1));
+  const X = p => pad + (p[0] * k - x0) * s + (W - 2 * pad - (x1 - x0) * s) / 2, Y = p => H - pad - (p[1] - y0) * s - (H - 2 * pad - (y1 - y0) * s) / 2;
+  g.clearRect(0, 0, W, H); g.lineWidth = 4; g.strokeStyle = 'rgba(255,255,255,.75)'; g.lineJoin = 'round'; g.beginPath();
+  coords.forEach((p, n) => n ? g.lineTo(X(p), Y(p)) : g.moveTo(X(p), Y(p))); g.stroke();
+  g.fillStyle = '#2b6cff'; g.strokeStyle = '#fff'; g.lineWidth = 3; g.beginPath(); g.arc(X(pos), Y(pos), 8, 0, 7); g.fill(); g.stroke();
+}
+
+// ---------- UI ----------
+function status(msg, err) { $('status').textContent = msg; $('status').classList.toggle('error', !!err); }
+let hideTimer;
+function showPanel(force) {
+  $('panel').classList.remove('hidden'); document.body.style.cursor = '';
+  clearTimeout(hideTimer);
+  if (document.body.classList.contains('playing') && !force)
+    hideTimer = setTimeout(() => { if (!$('panel').matches(':hover, :focus-within')) { $('panel').classList.add('hidden'); document.body.style.cursor = 'none'; } }, 3500);
+}
+addEventListener('mousemove', () => showPanel()); addEventListener('touchstart', () => showPanel());
+
+function applyPreset() {
+  const p = PRESETS[$('preset').value]; if (p) { $('from').value = p[1]; $('to').value = p[2]; }
+}
+$('preset').onchange = applyPreset;
+$('from').oninput = $('to').oninput = () => { $('preset').value = -1; };
+$('provider').onchange = () => { $('tokenRow').style.display = $('provider').value === 'mapillary' ? '' : 'none'; };
+$('token').value = localStorage.getItem('mlyToken') || '';
+$('music').onchange = () => { $('musicUrl').style.display = $('music').value === 'custom' ? '' : 'none'; startMusic(); };
+$('fs').onclick = () => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
+$('stop').onclick = stop;
+
+function startMusic() {
+  const a = $('audio'), v = $('music').value, url = v === 'custom' ? $('musicUrl').value.trim() : v;
+  if (!url || !document.body.classList.contains('playing')) { a.pause(); return; }
+  if (a.src !== url) a.src = url;
+  a.volume = 0.6; a.play().catch(() => {});
+}
+
+async function start() {
+  const from = $('from').value.trim(), to = $('to').value.trim(), provider = $('provider').value;
+  if (!from || !to) return status('Ange både start och mål.', true);
+  if (provider === 'mapillary') {
+    if (!$('token').value.trim()) return status('Mapillary kräver en access token (gratis på mapillary.com/dashboard/developers).', true);
+    localStorage.setItem('mlyToken', $('token').value.trim());
+  }
+  stop(); $('go').disabled = true;
+  try {
+    status('Söker platser…');
+    const a = await geocode(from), b = await geocode(to);
+    status('Räknar ut rutt…');
+    const r = await route(a, b), coords = r.geometry.coordinates;
+    if (r.distance > 40000) throw new Error('Rutten är över 4 mil – välj en kortare sträcka i den här MVP:n.');
+    const samples = resample(coords, 4);
+    const images = await fetchImagesAlong(samples, provider, (d, n) => status(`Hämtar gatubilder… ${d}/${n}`));
+    const { frames, coverage } = buildFrames(samples, images);
+    if (frames.length < 5) throw new Error(`Hittade för få gatubilder längs rutten (${frames.length}). Prova en annan sträcka eller bildkälla.`);
+    status(`${(r.distance / 1000).toFixed(1)} km · ${frames.length} bilder · täckning ${Math.round(coverage * 100)} %`);
+    $('go').disabled = false;
+    const q = new URLSearchParams({ from, to, provider, autoplay: 1 }); history.replaceState(null, '', '?' + q);
+    document.body.classList.add('playing'); startMusic(); showPanel();
+    play(frames, coords, `${from} → ${to}`);
+  } catch (e) { console.error(e); status(e.message || String(e), true); $('go').disabled = false; }
+}
+$('go').onclick = start;
+
+try { initGL(); } catch (e) { status(e.message, true); }
+// Kiosk mode: index.html?from=...&to=...&autoplay=1[&provider=mapillary&tempo=0.9]
+const qs = new URLSearchParams(location.search);
+if (qs.get('from')) { $('from').value = qs.get('from'); $('to').value = qs.get('to') || ''; $('preset').value = -1; } else applyPreset();
+if (qs.get('provider')) { $('provider').value = qs.get('provider'); $('provider').onchange(); }
+if (qs.get('tempo')) $('tempo').value = qs.get('tempo');
+if (qs.get('autoplay')) start();
+</script>
+</body>
+</html>

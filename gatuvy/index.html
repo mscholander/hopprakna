@@ -60,6 +60,7 @@
   <div class="row">
     <div><label>Bildkälla</label>
       <select id="provider">
+        <option value="both">Kombinerat (Panoramax + Mapillary)</option>
         <option value="panoramax">Panoramax (öppen, ingen nyckel)</option>
         <option value="mapillary">Mapillary (kräver token)</option>
       </select></div>
@@ -179,7 +180,7 @@ const providers = {
     const j = await getJSON(`https://api.panoramax.xyz/api/search?limit=3000&bbox=${bbox.join(',')}`);
     return (j.features || []).map(f => {
       const pr = f.properties, fov = (pr['pers:interior_orientation'] || {}).field_of_view;
-      return { id: f.id, p: f.geometry.coordinates, az: pr['view:azimuth'], pano: fov === 360,
+      return { src: 'panoramax', id: 'px:' + f.id, p: f.geometry.coordinates, az: pr['view:azimuth'], pano: fov === 360,
         seq: f.collection, sd: f.assets.sd.href, hd: f.assets.hd.href, t: Date.parse(pr.datetime) || 0,
         credit: `${pr['geovisio:producer'] || 'okänd'} · ${pr.license || ''} · Panoramax` };
     });
@@ -188,7 +189,8 @@ const providers = {
     const tok = $('token').value.trim();
     const j = await getJSON('https://graph.mapillary.com/images?limit=2000&fields=id,geometry,compass_angle,computed_compass_angle,is_pano,camera_type,width,height,sequence,thumb_2048_url,thumb_original_url,captured_at,creator'
       + `&bbox=${bbox.join(',')}&access_token=${encodeURIComponent(tok)}`);
-    return (j.data || []).map(f => ({ id: f.id, p: f.geometry.coordinates, az: f.computed_compass_angle ?? f.compass_angle,
+    return (j.data || []).map(f => ({ src: 'mapillary', id: 'mly:' + f.id, p: f.geometry.coordinates, az: f.computed_compass_angle ?? f.compass_angle,
+      
       pano: !!f.is_pano || f.camera_type === 'spherical' || f.camera_type === 'equirectangular',
       portrait: f.height > f.width, fisheye: f.camera_type === 'fisheye',
       seq: f.sequence, sd: f.thumb_2048_url, hd: f.thumb_original_url || f.thumb_2048_url, t: f.captured_at || 0,
@@ -196,7 +198,9 @@ const providers = {
   },
 };
 
+// provider: 'panoramax', 'mapillary' or 'both' (Panoramax first, Mapillary fills the gaps)
 async function fetchImagesAlong(samples, provider, onProgress) {
+  const sources = provider === 'both' ? ['panoramax', 'mapillary'] : [provider];
   // Split the route into ~150 m chunks and ask for the images inside each chunk's padded bounding box.
   const chunks = []; let cur = null, startD = 0;
   for (const s of samples) {
@@ -204,24 +208,28 @@ async function fetchImagesAlong(samples, provider, onProgress) {
     cur[0] = Math.min(cur[0], s.p[0]); cur[1] = Math.min(cur[1], s.p[1]);
     cur[2] = Math.max(cur[2], s.p[0]); cur[3] = Math.max(cur[3], s.p[1]);
   }
-  const byId = new Map(); let done = 0, failed = 0, next = 0;
+  const jobs = sources.flatMap(src => chunks.map(c => ({ src, c })));
+  const byId = new Map(), failed = {}, lastErr = {}; let done = 0, next = 0;
   async function worker() {
-    while (next < chunks.length) {
-      const c = chunks[next++];
+    while (next < jobs.length) {
+      const { src, c } = jobs[next++];
       const padLat = 20 / 111320, padLon = padLat / Math.cos(rad(c[1]));
       const bbox = [c[0] - padLon, c[1] - padLat, c[2] + padLon, c[3] + padLat].map(v => v.toFixed(6));
-      try { for (const im of await providers[provider](bbox)) if (im.az != null || im.pano) byId.set(im.id, im); }
-      catch (e) { failed++; console.warn(e); }
-      onProgress(++done, chunks.length);
+      try { for (const im of await providers[src](bbox)) if (im.az != null || im.pano) byId.set(im.id, im); }
+      catch (e) { failed[src] = (failed[src] || 0) + 1; lastErr[src] = e; console.warn(e); }
+      onProgress(++done, jobs.length);
     }
   }
   await Promise.all(Array.from({ length: 4 }, worker));
-  if (failed === chunks.length) throw new Error('Bildkällan svarade inte (kontrollera token/nätverk)');
-  return [...byId.values()];
+  const dead = sources.filter(src => failed[src] === chunks.length);
+  if (dead.length === sources.length) throw new Error('Bildkällan svarade inte: ' + (lastErr[dead[0]] || {}).message);
+  return { images: [...byId.values()], warnings: dead.map(src => `${src} svarade inte (${(lastErr[src] || {}).message})`) };
 }
 
-// Which way was the photographer actually moving? Work it out from the neighbouring photos in the
-// same capture run. A camera that points far away from that direction is a side or rear camera.
+// Which way was the photographer actually moving, and how fast? Work it out from the neighbouring
+// photos in the same capture run. A camera that points away from that direction is a side or rear
+// camera, or a phone that was briefly turned towards a building.
+const signed = (a, b) => ((a - b + 540) % 360) - 180;
 function markForwardFacing(images) {
   const bySeq = new Map();
   for (const im of images) (bySeq.get(im.seq) || bySeq.set(im.seq, []).get(im.seq)).push(im);
@@ -233,8 +241,20 @@ function markForwardFacing(images) {
       let a = null, b = null;
       for (let k = 1; k <= 3 && !a; k++) { const c = list[i - k]; if (c && dist(c.p, im.p) > 2) a = c; }
       for (let k = 1; k <= 3 && !b; k++) { const c = list[i + k]; if (c && dist(c.p, im.p) > 2) b = c; }
-      im.move = (a || b) ? bearing((a || im).p, (b || im).p) : null;
-      im.forward = im.pano || (im.az != null && im.move != null && angDiff(im.az, im.move) <= 25);
+      const A = a || im, B = b || im;
+      im.move = (a || b) ? bearing(A.p, B.p) : null;
+      im.kmh = (a || b) && B.t > A.t ? dist(A.p, B.p) / ((B.t - A.t) / 3.6e6) / 1000 : null;
+      im.dev = im.az != null && im.move != null ? signed(im.az, im.move) : null;
+    }
+    // A camera fixed to a car keeps the same offset all the time; a hand-held phone wanders.
+    const devs = list.map(im => im.dev).filter(d => d != null).sort((x, y) => x - y);
+    const medDev = devs.length ? devs[devs.length >> 1] : null;
+    const speeds = list.map(im => im.kmh).filter(v => v != null && isFinite(v)).sort((x, y) => x - y);
+    const medKmh = speeds.length ? speeds[speeds.length >> 1] : null;
+    for (const im of list) {
+      im.vehicle = medKmh != null && medKmh >= 9;     // faster than walking: car, bus or bike
+      im.forward = im.pano || (im.dev != null && medDev != null && Math.abs(medDev) <= 15
+        && Math.abs(im.dev) <= 20 && Math.abs(signed(im.dev, medDev)) <= 10);
     }
   }
 }
@@ -268,6 +288,31 @@ function buildFrames(samples, images) {
   const covPano = cov(true), covFlat = cov(false);
   const only = covPano >= 0.8 ? true : covFlat >= 0.8 ? false : covPano >= covFlat + 0.25 ? true : covFlat >= covPano + 0.25 ? false : null;
 
+  // Rank every photo: same camera kind first, then Panoramax before Mapillary.
+  // Then plan the whole trip at once (a small shortest-path search over the route points):
+  //  - using a worse rank costs a little per metre,
+  //  - leaving a point without a photo (a jump) costs more per metre,
+  //  - every switch of rank costs a lot.
+  // Result: short patches of a better source are ignored, short holes are jumped over,
+  // and a switch only happens when the new source covers a long stretch.
+  const tierOf = im => (only !== null && im.pano !== only ? 2 : 0) + (im.src === 'mapillary' ? 1 : 0);
+  const T = 4, RANK_COST = 0.5, HOLE_COST = 3, SWITCH_COST = 15;
+  const avail = cand.map(c => { const a = new Array(T).fill(false); c.forEach(im => a[tierOf(im)] = true); return a; });
+  const N = samples.length, cost = [], from = [];
+  for (let n = 0; n < N; n++) {
+    cost.push(new Array(T)); from.push(new Array(T));
+    for (let t = 0; t < T; t++) {
+      const here = avail[n][t] ? t * RANK_COST : HOLE_COST;
+      if (n === 0) { cost[0][t] = here; continue; }
+      let best = 1e18, arg = 0;
+      for (let u = 0; u < T; u++) { const c = cost[n - 1][u] + (u === t ? 0 : SWITCH_COST); if (c < best) { best = c; arg = u; } }
+      cost[n][t] = best + here; from[n][t] = arg;
+    }
+  }
+  const allowed = new Array(N);
+  let st = cost[N - 1].indexOf(Math.min(...cost[N - 1]));
+  for (let n = N - 1; n >= 0; n--) { allowed[n] = avail[n][st] ? st : -1; if (n) st = from[n][st]; }
+
   // Long runs from the same capture keep light, season and camera height the same.
   const seqLen = new Map();
   cand.forEach(c => new Set(c.map(im => im.seq)).forEach(q => seqLen.set(q, (seqLen.get(q) || 0) + 1)));
@@ -276,12 +321,14 @@ function buildFrames(samples, images) {
   samples.forEach((s, n) => {
     let best = null, bestScore = 1e9;
     for (const im of cand[n]) {
-      if (only !== null && im.pano !== only) continue;         // one camera kind for the whole trip
+      if (tierOf(im) !== allowed[n]) continue;               // best source + camera kind available here
       let score = dist(s.p, im.p);
       if (!im.pano) score += angDiff(im.az, s.brg) * 0.15;     // the straighter ahead, the better
       if (prev && im.seq !== prev.seq) score += 15;           // switching capture run = visible jump
       if (prev && im.pano !== prev.pano) score += 15;         // switching camera kind = bigger jump
+      if (prev && im.src !== prev.src) score += 15;           // switching source = biggest jump
       score -= Math.min(8, (seqLen.get(im.seq) || 0) * 4 / samples.length * 8);
+      if (!im.vehicle) score += 8;                            // dashcam feel: prefer runs filmed from a vehicle
       if (prev && im.id === prev.id) score -= 1;
       // A run may have been driven the other way (fine for 360°), but it must not change direction under us.
       if (prev && im.seq === prev.seq && im.id !== prev.id && runDir && Math.sign(im.t - prev.t) !== runDir) score += 20;
@@ -294,7 +341,8 @@ function buildFrames(samples, images) {
     frames.push({ im: best, brg: s.sbrg, road: s.brg, cx: 0, cy: 0, p: s.p, d: s.d });
     prev = best;
   });
-  return { frames, coverage: covered / samples.length };
+  const fromMly = frames.filter(f => f.im.src === 'mapillary').length;
+  return { frames, coverage: covered / samples.length, mixShare: frames.length ? fromMly / frames.length : 0 };
 }
 
 // ---------- WebGL renderer: cross-fades two images, re-projects 360° panoramas ----------
@@ -413,7 +461,7 @@ function align(a, b) { // sets b.cx / b.cy so that b lines up with a (as a is cu
   if (!a || !a.img || !b.img || a.im.pano !== b.im.pano) return;
   try {
     const m = matchShift(crop(a, a.brg, a.cx, a.cy), crop(b, a.brg, 0, 0));
-    if (!m) return;
+    if (!m) return a.im.seq === b.im.seq && !b.im.pano && dist(a.im.p, b.im.p) < 15 ? false : undefined;
     // 0.9: slowly drift back to what the metadata says, so errors cannot pile up.
     if (b.im.pano) { b.cx = clamp(0.9 * rad(m.dx * DEG_PX), rad(8)); b.cy = clamp(-0.9 * rad(m.dy * DEG_PX), rad(4)); }
     else { b.cx = clamp(0.9 * m.dx * 0.5 / CW, 0.07); b.cy = clamp(0.9 * m.dy * 0.5 / CH, 0.07); }
@@ -444,7 +492,7 @@ async function play(frames, routeCoords, label) {
   const gaps = frames.slice(1).map((f, n) => dist(frames[n].im.p, f.im.p)).sort((x, y) => x - y);
   const medGap = Math.max(1, gaps[gaps.length >> 1] || 4);
   const base = f => f.im.pano ? 1 : FLAT_BASE;
-  let i = 0, cur = null;
+  let i = 0, cur = null, skipped = 0;
   while (run === my) {
     for (let k = 0; k < AHEAD; k++) loadFrame(frames[(i + k) % frames.length], quality);
     const nxt = frames[i % frames.length];
@@ -452,7 +500,9 @@ async function play(frames, routeCoords, label) {
     if (run !== my) return;
     if (nxt.ok && !nxt.im.pano && nxt.aspect < 1.1) nxt.ok = false; // portrait phone photo: skip
     if (nxt.ok && nxt !== cur) {
-      align(cur, nxt);
+      // Same capture run but the picture looks nothing like the one before: probably turned to the side.
+      if (align(cur, nxt) === false && skipped < 2) { skipped++; freeFrame(nxt); i++; continue; }
+      skipped = 0;
       $('credit').textContent = '© ' + nxt.im.credit;
       $('place').textContent = label;
       drawMini(routeCoords, nxt.p);
@@ -506,7 +556,7 @@ function applyPreset() {
 }
 $('preset').onchange = applyPreset;
 $('from').oninput = $('to').oninput = () => { $('preset').value = -1; };
-$('provider').onchange = () => { $('tokenRow').style.display = $('provider').value === 'mapillary' ? '' : 'none'; localStorage.setItem('provider', $('provider').value); };
+$('provider').onchange = () => { $('tokenRow').style.display = $('provider').value !== 'panoramax' ? '' : 'none'; localStorage.setItem('provider', $('provider').value); };
 // The token is remembered in this browser. It can also be given once in the address: ?token=MLY|...
 if (new URLSearchParams(location.search).get('token')) localStorage.setItem('mlyToken', new URLSearchParams(location.search).get('token'));
 $('token').value = localStorage.getItem('mlyToken') || '';
@@ -523,7 +573,9 @@ function startMusic() {
 }
 
 async function start() {
-  const from = $('from').value.trim(), to = $('to').value.trim(), provider = $('provider').value;
+  const from = $('from').value.trim(), to = $('to').value.trim(), hasToken = !!$('token').value.trim();
+  // Combined mode without a token simply becomes Panoramax only.
+  const provider = $('provider').value === 'both' && !hasToken ? 'panoramax' : $('provider').value;
   if (!from || !to) return status('Ange både start och mål.', true);
   if (provider === 'mapillary') {
     if (!$('token').value.trim()) return status('Mapillary kräver en access token (gratis på mapillary.com/dashboard/developers).', true);
@@ -537,10 +589,13 @@ async function start() {
     const r = await route(a, b), coords = r.geometry.coordinates;
     if (r.distance > 40000) throw new Error('Rutten är över 4 mil – välj en kortare sträcka i den här MVP:n.');
     const samples = resample(coords, 4);
-    const images = await fetchImagesAlong(samples, provider, (d, n) => status(`Hämtar gatubilder… ${d}/${n}`));
-    const { frames, coverage } = buildFrames(samples, images);
+    const { images, warnings } = await fetchImagesAlong(samples, provider, (d, n) => status(`Hämtar gatubilder… ${d}/${n}`));
+    const { frames, coverage, mixShare } = buildFrames(samples, images);
     if (frames.length < 5) throw new Error(`Hittade för få gatubilder längs rutten (${frames.length}). Prova en annan sträcka eller bildkälla.`);
-    status(`${(r.distance / 1000).toFixed(1)} km · ${frames.length} bilder · täckning ${Math.round(coverage * 100)} %`);
+    const mix = provider === 'both' ? ` · ${Math.round(mixShare * 100)} % från Mapillary` : '';
+    status(`${(r.distance / 1000).toFixed(1)} km · ${frames.length} bilder · täckning ${Math.round(coverage * 100)} %${mix}`
+      + (warnings.length ? '\nObs: ' + warnings.join('; ') : '')
+      + ($('provider').value === 'both' && !hasToken ? '\nUtan Mapillary-token används bara Panoramax.' : ''));
     $('go').disabled = false;
     const q = new URLSearchParams({ from, to, provider, autoplay: 1 }); history.replaceState(null, '', '?' + q);
     document.body.classList.add('playing'); startMusic(); setCollapsed(true);
@@ -553,7 +608,7 @@ try { initGL(); } catch (e) { status(e.message, true); }
 // Kiosk mode: index.html?from=...&to=...&autoplay=1[&provider=mapillary&tempo=0.9]
 const qs = new URLSearchParams(location.search);
 if (qs.get('from')) { $('from').value = qs.get('from'); $('to').value = qs.get('to') || ''; $('preset').value = -1; } else applyPreset();
-const prov = qs.get('provider') || localStorage.getItem('provider');
+const prov = qs.get('provider') || localStorage.getItem('provider') || 'both';
 if (prov) { $('provider').value = prov; $('provider').onchange(); }
 if (qs.get('tempo')) $('tempo').value = qs.get('tempo');
 if (qs.get('autoplay')) start();

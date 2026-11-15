@@ -204,24 +204,38 @@ async function fetchImagesAlong(samples, provider, onProgress) {
   // Split the route into ~150 m chunks and ask for the images inside each chunk's padded bounding box.
   const chunks = []; let cur = null, startD = 0;
   for (const s of samples) {
-    if (!cur || s.d - startD > 150) { cur = [1e9, 1e9, -1e9, -1e9]; chunks.push(cur); startD = s.d; }
-    cur[0] = Math.min(cur[0], s.p[0]); cur[1] = Math.min(cur[1], s.p[1]);
-    cur[2] = Math.max(cur[2], s.p[0]); cur[3] = Math.max(cur[3], s.p[1]);
+    if (!cur || s.d - startD > 150) { cur = { box: [1e9, 1e9, -1e9, -1e9], samples: [] }; chunks.push(cur); startD = s.d; }
+    const c = cur.box; cur.samples.push(s);
+    c[0] = Math.min(c[0], s.p[0]); c[1] = Math.min(c[1], s.p[1]);
+    c[2] = Math.max(c[2], s.p[0]); c[3] = Math.max(c[3], s.p[1]);
   }
-  const jobs = sources.flatMap(src => chunks.map(c => ({ src, c })));
-  const byId = new Map(), failed = {}, lastErr = {}; let done = 0, next = 0;
-  async function worker() {
-    while (next < jobs.length) {
-      const { src, c } = jobs[next++];
-      const padLat = 20 / 111320, padLon = padLat / Math.cos(rad(c[1]));
-      const bbox = [c[0] - padLon, c[1] - padLat, c[2] + padLon, c[3] + padLat].map(v => v.toFixed(6));
-      try { for (const im of await providers[src](bbox)) if (im.az != null || im.pano) byId.set(im.id, im); }
-      catch (e) { failed[src] = (failed[src] || 0) + 1; lastErr[src] = e; console.warn(e); }
-      onProgress(++done, jobs.length);
+  const byId = new Map(), failed = {}, lastErr = {};
+  let done = 0, total = chunks.length * sources.length;
+  async function fetchAll(src, list) {
+    let next = 0;
+    async function worker() {
+      while (next < list.length) {
+        const ch = list[next++], c = ch.box;
+        const padLat = 20 / 111320, padLon = padLat / Math.cos(rad(c[1]));
+        const bbox = [c[0] - padLon, c[1] - padLat, c[2] + padLon, c[3] + padLat].map(v => v.toFixed(6));
+        try { for (const im of await providers[src](bbox)) if (im.az != null || im.pano) { byId.set(im.id, im); (ch.found ||= []).push(im); } }
+        catch (e) { failed[src] = (failed[src] || 0) + 1; lastErr[src] = e; console.warn(e); }
+        onProgress(++done, total);
+      }
     }
+    await Promise.all(Array.from({ length: 8 }, worker));
   }
-  await Promise.all(Array.from({ length: 4 }, worker));
-  const dead = sources.filter(src => failed[src] === chunks.length);
+  // Panoramax first. Mapillary is slow (a couple of seconds per call), so in combined mode it is only
+  // asked about the stretches where Panoramax does not already have a photo looking along the road.
+  await fetchAll(sources[0], chunks);
+  let mlyChunks = 0;
+  if (sources[1]) {
+    const covered = (ch, s) => (ch.found || []).some(im => dist(s.p, im.p) <= 14 && (im.pano || angDiff(im.az, s.brg) <= 20));
+    const todo = chunks.filter(ch => ch.samples.filter(s => covered(ch, s)).length < 0.8 * ch.samples.length);
+    total = chunks.length + todo.length; mlyChunks = todo.length;
+    await fetchAll(sources[1], todo);
+  }
+  const dead = sources.filter((src, i) => failed[src] && failed[src] === (i ? mlyChunks : chunks.length));
   if (dead.length === sources.length) throw new Error('Bildkällan svarade inte: ' + (lastErr[dead[0]] || {}).message);
   return { images: [...byId.values()], warnings: dead.map(src => `${src} svarade inte (${(lastErr[src] || {}).message})`) };
 }

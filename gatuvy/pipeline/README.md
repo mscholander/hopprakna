@@ -27,5 +27,10 @@ Erfarenheter från testet (Rue de Rivoli, Paris, 19 nyckelbilder):
 - Wan 2.2 (start- och slutbild) ger skarp, filmlik rörelse även med 25 m mellan fotona, och klippen möts
   utan synligt hopp i skarvarna. Modellen hittar på detaljer (människor, bilar) mellan fotona.
   Ca 75–90 s beräkningstid per klipp hos Replicate.
+- Nyckelbilder ca 11 m isär (`--spacing 2 --step 4`) ger klart bäst resultat med Wan; vid 25 m hittar
+  modellen på för mycket (bilar kör in i väggar, fotgängare rör sig slumpartat) och farten blir för hög.
+- Pris hos Replicate för `wan-video/wan-2.2-i2v-fast` (nov 2026): 0,05 dollar per klipp i 480p och
+  0,11 dollar i 720p. `lucataco/wan-2.2-first-last-frame` debiteras per sekund och blev ca 0,07 dollar
+  per klipp i 480p, alltså inte billigare.
 - FILM fungerar bäst när fotona ligger högst ca 2,5 m isär; föremål nära kameran (pelare, bilar,
   byggnadsställningar) förvrängs ändå i mellanbilderna.

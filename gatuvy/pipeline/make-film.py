@@ -22,6 +22,16 @@ VERSIONS = {  # låsta versioner, så att resultatet inte ändras om modellerna 
     'maxim': '494ca4d578293b4b93945115601b6a38190519da18467556ca223d219c3af9f9',
 }
 stats = {'runs': 0, 'seconds': 0.0}
+OFFICIAL = {}
+# Generativa modeller med start- och slutbild: hur deras indata heter. (a = flaggorna, p = masterprompten)
+ENGINES = {
+    'wan-video/wan-2.2-i2v-fast': lambda a, p, first, last: {'image': first, 'last_image': last, 'prompt': p, 'resolution': a.resolution,
+                                                             'num_frames': a.frames, 'seed': a.seed},
+    'lucataco/wan-2.2-first-last-frame': lambda a, p, first, last: {'start_image': first, 'end_image': last, 'prompt': p,
+                                                                     'duration_seconds': a.seconds, 'seed': a.seed},
+    'wan-video/wan-2.7-i2v': lambda a, p, first, last: {'first_frame': first, 'last_frame': last, 'prompt': p, 'resolution': a.resolution,
+                                                         'duration': int(a.seconds), 'seed': a.seed, 'enable_prompt_expansion': False},
+}
 
 def http(url, data=None, headers=None, method=None, timeout=300):
     h = {'User-Agent': 'gatuvy-pipeline'}
@@ -58,7 +68,13 @@ def data_uri(path):
 
 def run_hosted(model, inputs):
     # 'film'/'maxim' körs med låst version; andra anges som ägare/namn (Replicates officiella modeller)
-    url, body = (API + '/predictions', {'version': VERSIONS[model], 'input': inputs}) if model in VERSIONS else (f'{API}/models/{model}/predictions', {'input': inputs})
+    if model in VERSIONS: url, body = API + '/predictions', {'version': VERSIONS[model], 'input': inputs}
+    else:
+        if model not in OFFICIAL:   # officiella modeller körs per namn, övriga behöver ett versionsnummer
+            info = json.loads(http(f'{API}/models/{model}'))
+            OFFICIAL[model] = None if info.get('is_official') else info['latest_version']['id']
+        v = OFFICIAL[model]
+        url, body = (API + '/predictions', {'version': v, 'input': inputs}) if v else (f'{API}/models/{model}/predictions', {'input': inputs})
     p = json.loads(http(url, json.dumps(body).encode(), {'Content-Type': 'application/json', 'Prefer': 'wait=30'}))
     while p['status'] in ('starting', 'processing'):
         time.sleep(2); p = json.loads(http(p['urls']['get']))
@@ -86,7 +102,7 @@ def main():
     ap.add_argument('--engine', default='film', help='"film" (mellanbilder) eller en generativ videomodell med start- och slutbild, t.ex. wan-video/wan-2.2-i2v-fast')
     ap.add_argument('--prompt', default=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'master-prompt.txt'), help='fil med masterprompten för generativa modeller')
     ap.add_argument('--resolution', default='720p'); ap.add_argument('--frames', type=int, default=81, help='bildrutor per klipp för generativa modeller')
-    ap.add_argument('--seed', type=int, default=1)
+    ap.add_argument('--seed', type=int, default=1); ap.add_argument('--seconds', type=float, default=5, help='kliplängd för modeller som anger tid')
     ap.add_argument('--fps', type=int, default=30); ap.add_argument('--jobs', type=int, default=3)
     ap.add_argument('--film-local', default=''); ap.add_argument('--maxim-local', default='')
     a = ap.parse_args()
@@ -111,14 +127,14 @@ def main():
 
     # 2. ett klipp per bildpar
     gen = a.engine != 'film'
-    label = ('gen-' + a.engine.split('/')[-1] + '-' + a.resolution) if gen else f't{a.times}'
+    if gen and a.engine not in ENGINES: sys.exit('Okänd modell. Kända: ' + ', '.join(ENGINES))
+    label = ('gen-' + a.engine.split('/')[-1] + ('-' + a.resolution if 'resolution' in ENGINES[a.engine](a, '', '', '') else '')) if gen else f't{a.times}'
     prompt = open(a.prompt).read().strip() if gen else ''
     def clip(i):
         dst = os.path.join(d, f'clip_{i:04d}_{label}.mp4')
         if not os.path.exists(dst):
             if gen:   # samma masterprompt för alla klipp; startbild = detta foto, slutbild = nästa
-                out = run_hosted(a.engine, {'image': urls[i], 'last_image': urls[i + 1], 'prompt': prompt, 'resolution': a.resolution,
-                                            'num_frames': a.frames, 'seed': a.seed})
+                out = run_hosted(a.engine, ENGINES[a.engine](a, prompt, urls[i], urls[i + 1]))
                 save(out if isinstance(out, str) else out[0], dst)
             else:
                 inp = {'frame1': urls[i], 'frame2': urls[i + 1], 'times_to_interpolate': a.times}

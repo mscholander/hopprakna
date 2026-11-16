@@ -57,8 +57,9 @@ def data_uri(path):
     return 'data:image/jpeg;base64,' + base64.b64encode(open(path, 'rb').read()).decode()
 
 def run_hosted(model, inputs):
-    p = json.loads(http(API + '/predictions', json.dumps({'version': VERSIONS[model], 'input': inputs}).encode(),
-                        {'Content-Type': 'application/json', 'Prefer': 'wait=30'}))
+    # 'film'/'maxim' körs med låst version; andra anges som ägare/namn (Replicates officiella modeller)
+    url, body = (API + '/predictions', {'version': VERSIONS[model], 'input': inputs}) if model in VERSIONS else (f'{API}/models/{model}/predictions', {'input': inputs})
+    p = json.loads(http(url, json.dumps(body).encode(), {'Content-Type': 'application/json', 'Prefer': 'wait=30'}))
     while p['status'] in ('starting', 'processing'):
         time.sleep(2); p = json.loads(http(p['urls']['get']))
     if p['status'] != 'succeeded': raise RuntimeError(f'{model} misslyckades: {p.get("error")}')
@@ -82,6 +83,10 @@ def main():
     ap.add_argument('work'); ap.add_argument('--out', default=None)
     ap.add_argument('--enhance', default='', help='MAXIM-läge, t.ex. "Image Deblurring (GoPro)"; tomt = ingen förbättring')
     ap.add_argument('--times', type=int, default=4, help='FILM: 2^times steg per bildpar (4 = 16 steg)')
+    ap.add_argument('--engine', default='film', help='"film" (mellanbilder) eller en generativ videomodell med start- och slutbild, t.ex. wan-video/wan-2.2-i2v-fast')
+    ap.add_argument('--prompt', default=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'master-prompt.txt'), help='fil med masterprompten för generativa modeller')
+    ap.add_argument('--resolution', default='720p'); ap.add_argument('--frames', type=int, default=81, help='bildrutor per klipp för generativa modeller')
+    ap.add_argument('--seed', type=int, default=1)
     ap.add_argument('--fps', type=int, default=30); ap.add_argument('--jobs', type=int, default=3)
     ap.add_argument('--film-local', default=''); ap.add_argument('--maxim-local', default='')
     a = ap.parse_args()
@@ -105,21 +110,30 @@ def main():
     print(f'{len(keys)} nyckelbilder klara ({tag}), {time.time() - t0:.0f} s')
 
     # 2. ett klipp per bildpar
+    gen = a.engine != 'film'
+    label = ('gen-' + a.engine.split('/')[-1] + '-' + a.resolution) if gen else f't{a.times}'
+    prompt = open(a.prompt).read().strip() if gen else ''
     def clip(i):
-        dst = os.path.join(d, f'clip_{i:04d}_t{a.times}.mp4')
+        dst = os.path.join(d, f'clip_{i:04d}_{label}.mp4')
         if not os.path.exists(dst):
-            inp = {'frame1': urls[i], 'frame2': urls[i + 1], 'times_to_interpolate': a.times}
-            save(run_local(a.film_local, inp) if a.film_local else run_hosted('film', inp), dst)
+            if gen:   # samma masterprompt för alla klipp; startbild = detta foto, slutbild = nästa
+                out = run_hosted(a.engine, {'image': urls[i], 'last_image': urls[i + 1], 'prompt': prompt, 'resolution': a.resolution,
+                                            'num_frames': a.frames, 'seed': a.seed})
+                save(out if isinstance(out, str) else out[0], dst)
+            else:
+                inp = {'frame1': urls[i], 'frame2': urls[i + 1], 'times_to_interpolate': a.times}
+                save(run_local(a.film_local, inp) if a.film_local else run_hosted('film', inp), dst)
         return dst
     with cf.ThreadPoolExecutor(a.jobs) as ex: clips = list(ex.map(clip, range(len(keys) - 1)))
     print(f'{len(clips)} klipp klara, {time.time() - t0:.0f} s')
 
     # 3. foga ihop: varje klipp slutar på nästa klipps första bild, så den dubbla bilden tas bort
-    out = a.out or os.path.join(a.work, f'film_{tag}_t{a.times}.mp4')
+    out = a.out or os.path.join(a.work, f'film_{tag}_{label}.mp4')
     args = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y']
     for c in clips: args += ['-i', c]
     n = len(clips)
-    parts = ''.join(f'[{i}:v]{"trim=start_frame=1," if i else ""}setpts=PTS-STARTPTS,fps={a.fps}[v{i}];' for i in range(n))
+    # alla bildrutor spelas i a.fps (generativa klipp levereras i 16 bilder/s och blir då snabbare och mjukare)
+    parts = ''.join(f'[{i}:v]{"trim=start_frame=1," if i else ""}setpts=N/({a.fps}*TB),fps={a.fps}[v{i}];' for i in range(n))
     args += ['-filter_complex', parts + ''.join(f'[v{i}]' for i in range(n)) + f'concat=n={n}:v=1[o]', '-map', '[o]',
              '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '18', '-movflags', '+faststart', out]
     subprocess.run(args, check=True)

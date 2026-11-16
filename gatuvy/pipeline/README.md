@@ -10,6 +10,10 @@ Gör en riktig videofil av en rutt, i stället för att sidan tonar mellan foton
      (PyTorch; ca 18 s per mellanbild på en vanlig processor med 4 kärnor, mycket snabbare med NVIDIA-kort)
    - Replicate eller egen Docker: `python3 make-film.py work/paris --times 4`
      (kräver `REPLICATE_API_TOKEN` och kredit på kontot, eller `--film-local http://localhost:5000`)
+   - generativ videomodell med start- och slutbild (bäst resultat hittills):
+     `python3 make-film.py work/paris --engine wan-video/wan-2.2-i2v-fast --resolution 720p`
+     Använder masterprompten i `master-prompt.txt` för alla klipp. Exportera då nyckelbilder ca 25 m isär
+     (`export-frames.js --spacing 2 --step 9`): varje klipp blir 81 bildrutor, 2,7 s i 30 bilder/s.
 3. **Bildförbättring med MAXIM** (valfritt, före steg 2): `make-film.py … --enhance "Image Deblurring (GoPro)"`.
 
 `--times 4` ger 16 steg per bildpar, alltså drygt en halv sekund film per par vid 30 bilder per sekund.
@@ -20,5 +24,8 @@ Docker-läget (`--film-local`, `--maxim-local`) är inte provat.
 Erfarenheter från testet (Rue de Rivoli, Paris, 19 nyckelbilder):
 - Hos Replicate tar FILM ca 13 s beräkningstid per bildpar och MAXIM ca 25 s per bild.
 - MAXIM gav ingen synlig skillnad på Panoramax originalfoton, som redan är skarpa.
+- Wan 2.2 (start- och slutbild) ger skarp, filmlik rörelse även med 25 m mellan fotona, och klippen möts
+  utan synligt hopp i skarvarna. Modellen hittar på detaljer (människor, bilar) mellan fotona.
+  Ca 75–90 s beräkningstid per klipp hos Replicate.
 - FILM fungerar bäst när fotona ligger högst ca 2,5 m isär; föremål nära kameran (pelare, bilar,
   byggnadsställningar) förvrängs ändå i mellanbilderna.

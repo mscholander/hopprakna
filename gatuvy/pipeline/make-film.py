@@ -29,6 +29,10 @@ ENGINES = {
                                                              'num_frames': a.frames, 'seed': a.seed},
     'lucataco/wan-2.2-first-last-frame': lambda a, p, first, last: {'start_image': first, 'end_image': last, 'prompt': p,
                                                                      'duration_seconds': a.seconds, 'seed': a.seed},
+    'bytedance/seedance-1.5-pro': lambda a, p, first, last: {'image': first, 'last_frame_image': last, 'prompt': p, 'resolution': a.resolution,
+                                                              'duration': max(4, int(a.seconds)), 'generate_audio': False, 'seed': a.seed},
+    'prunaai/p-video': lambda a, p, first, last: {'image': first, 'last_frame_image': last, 'prompt': p, 'resolution': a.resolution,
+                                                  'duration': max(1, int(a.seconds)), 'fps': 24, 'save_audio': False, 'prompt_upsampling': False, 'seed': a.seed, 'draft': a.draft},
     'wan-video/wan-2.7-i2v': lambda a, p, first, last: {'first_frame': first, 'last_frame': last, 'prompt': p, 'resolution': a.resolution,
                                                          'duration': int(a.seconds), 'seed': a.seed, 'enable_prompt_expansion': False},
 }
@@ -103,6 +107,8 @@ def main():
     ap.add_argument('--prompt', default=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'master-prompt.txt'), help='fil med masterprompten för generativa modeller')
     ap.add_argument('--resolution', default='720p'); ap.add_argument('--frames', type=int, default=81, help='bildrutor per klipp för generativa modeller')
     ap.add_argument('--seed', type=int, default=1); ap.add_argument('--seconds', type=float, default=5, help='kliplängd för modeller som anger tid')
+    ap.add_argument('--draft', action='store_true', help='utkastläge (billigare, lägre kvalitet) för modeller som har det')
+    ap.add_argument('--clip-seconds', type=float, default=0, help='spela varje klipp på så här många sekunder i den färdiga filmen (0 = alla bildrutor i --fps)')
     ap.add_argument('--fps', type=int, default=30); ap.add_argument('--jobs', type=int, default=3)
     ap.add_argument('--film-local', default=''); ap.add_argument('--maxim-local', default='')
     a = ap.parse_args()
@@ -128,7 +134,7 @@ def main():
     # 2. ett klipp per bildpar
     gen = a.engine != 'film'
     if gen and a.engine not in ENGINES: sys.exit('Okänd modell. Kända: ' + ', '.join(ENGINES))
-    label = ('gen-' + a.engine.split('/')[-1] + ('-' + a.resolution if 'resolution' in ENGINES[a.engine](a, '', '', '') else '')) if gen else f't{a.times}'
+    label = ('gen-' + a.engine.split('/')[-1] + ('-' + a.resolution if 'resolution' in ENGINES[a.engine](a, '', '', '') else '') + ('-draft' if a.draft else '')) if gen else f't{a.times}'
     prompt = open(a.prompt).read().strip() if gen else ''
     def clip(i):
         dst = os.path.join(d, f'clip_{i:04d}_{label}.mp4')
@@ -149,7 +155,11 @@ def main():
     for c in clips: args += ['-i', c]
     n = len(clips)
     # alla bildrutor spelas i a.fps (generativa klipp levereras i 16 bilder/s och blir då snabbare och mjukare)
-    parts = ''.join(f'[{i}:v]{"trim=start_frame=1," if i else ""}setpts=N/({a.fps}*TB),fps={a.fps}[v{i}];' for i in range(n))
+    def retime(c):   # antal bildrutor i klippet -> faktor som ger önskad längd
+        nb = int(subprocess.run(['ffprobe', '-v', 'error', '-count_frames', '-select_streams', 'v', '-show_entries', 'stream=nb_read_frames', '-of', 'csv=p=0', c],
+                                capture_output=True, text=True).stdout.strip() or 0)
+        return f'setpts=N*{a.clip_seconds / max(1, nb - 1):.6f}/TB' if a.clip_seconds else f'setpts=N/({a.fps}*TB)'
+    parts = ''.join(f'[{i}:v]{"trim=start_frame=1," if i else ""}{retime(c)},fps={a.fps}[v{i}];' for i, c in enumerate(clips))
     args += ['-filter_complex', parts + ''.join(f'[v{i}]' for i in range(n)) + f'concat=n={n}:v=1[o]', '-map', '[o]',
              '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '18', '-movflags', '+faststart', out]
     subprocess.run(args, check=True)

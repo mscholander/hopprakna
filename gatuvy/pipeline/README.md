@@ -32,5 +32,8 @@ Erfarenheter från testet (Rue de Rivoli, Paris, 19 nyckelbilder):
 - Pris hos Replicate för `wan-video/wan-2.2-i2v-fast` (nov 2026): 0,05 dollar per klipp i 480p och
   0,11 dollar i 720p. `lucataco/wan-2.2-first-last-frame` debiteras per sekund och blev ca 0,07 dollar
   per klipp i 480p, alltså inte billigare.
+- `prunaai/p-video` (0,02 dollar per sekund i 720p, 0,005 i utkastläge `--draft`) ger rörelse och rena skarvar
+  med 3 s klipp: ca 0,06 dollar per klipp i 720p. Utkastläget är mjukare och förvränger småsaker.
+  `bytedance/seedance-1.5-pro` är nedlagd hos Replicate.
 - FILM fungerar bäst när fotona ligger högst ca 2,5 m isär; föremål nära kameran (pelare, bilar,
   byggnadsställningar) förvrängs ändå i mellanbilderna.

@@ -109,6 +109,7 @@ def main():
     ap.add_argument('--seed', type=int, default=1); ap.add_argument('--seconds', type=float, default=5, help='kliplängd för modeller som anger tid')
     ap.add_argument('--draft', action='store_true', help='utkastläge (billigare, lägre kvalitet) för modeller som har det')
     ap.add_argument('--speed', type=float, default=0, help='jämn fart i m/s: varje klipp spelas på (avstånd mellan fotona)/fart sekunder, t.ex. 4.1 = 15 km/h')
+    ap.add_argument('--max-gap', type=float, default=30, help='större lucka än så här (meter) mellan två foton genereras inte, utan blir en kort övertoning')
     ap.add_argument('--clip-seconds', type=float, default=0, help='spela varje klipp på så här många sekunder i den färdiga filmen (0 = alla bildrutor i --fps)')
     ap.add_argument('--fps', type=int, default=30); ap.add_argument('--jobs', type=int, default=3)
     ap.add_argument('--film-local', default=''); ap.add_argument('--maxim-local', default='')
@@ -140,9 +141,12 @@ def main():
     gaps = [f.get('gap', 0) for f in meta['frames']][1:]
     # hur länge varje klipp ska synas i filmen: jämn fart om --speed är satt, annars --clip-seconds
     play = [max(0.4, g / a.speed) if a.speed and g else a.clip_seconds for g in gaps]
+    cuts = [i for i, g in enumerate(gaps) if gen and g > a.max_gap]
+    for i in cuts: play[i] = 1.0
     failed = []
     def clip(i):
         dst = os.path.join(d, f'clip_{i:04d}_{label}.mp4')
+        if i in cuts: return None   # för långt mellan fotona för att generera något trovärdigt
         if not os.path.exists(dst):
             if gen:   # samma masterprompt för alla klipp; startbild = detta foto, slutbild = nästa
                 import copy, math
@@ -189,6 +193,7 @@ def main():
     # fotograferna ska anges (bilderna är öppet licensierade)
     names = sorted({f.get('credit', '') for f in meta['frames'] if f.get('credit')})
     open(os.path.splitext(out)[0] + '_credits.txt', 'w').write('Gatubilder:\n' + '\n'.join('  © ' + n for n in names) + '\n')
+    if cuts: print(f'{len(cuts)} luckor över {a.max_gap:.0f} m blev korta övertoningar i stället för genererade klipp')
     if failed: print(f'{len(failed)} klipp gick inte att generera och ersattes med övertoning: {sorted(failed)}')
     print(f'Film: {out}')
     if stats['runs']: print(f'Replicate: {stats["runs"]} körningar, {stats["seconds"]:.0f} s beräkningstid')

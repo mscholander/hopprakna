@@ -67,8 +67,11 @@ const server = http.createServer((q, r) => {
     const r = await page.evaluate(async i => {
       const fr = window.__frames, f = fr[i], prev = i ? fr[i - 1] : null;
       await loadFrame(f, 'hd'); if (!f.ok) return null;
+      if (!f.im.pano && f.aspect < 1.1) { f.ok = false; return null; }   // stående mobilbild
       align(prev && prev.ok ? prev : null, f);
-      draw(f, null, 0, f.im.pano ? 1 : 1.3, 1, f.brg);
+      // vanliga foton: ingen förskjutning och bara lätt beskärning, så att så mycket som möjligt av bilden kommer med
+      if (!f.im.pano) f.cx = f.cy = 0;
+      draw(f, null, 0, f.im.pano ? 1 : 1.15, 1, f.brg);
       const data = document.getElementById('view').toDataURL('image/jpeg', 0.95);
       if (prev && prev.ok && i > 1) { const pp = fr[i - 2]; if (pp.tex) { gl.deleteTexture(pp.tex); pp.tex = null; pp.img = null; } }
       return { data, lon: f.im.p[0], lat: f.im.p[1], bearing: f.brg, pano: f.im.pano, credit: f.im.credit, taken: f.im.t, src: f.im.hd, seq: f.im.seq,

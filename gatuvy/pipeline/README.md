@@ -14,5 +14,11 @@ Gör en riktig videofil av en rutt, i stället för att sidan tonar mellan foton
 
 `--times 4` ger 16 steg per bildpar, alltså drygt en halv sekund film per par vid 30 bilder per sekund.
 
-Status: `export-frames.js` och `film-local.py` är körda. `make-film.py` är skriven mot Replicates API men
-inte körd hela vägen (kontot saknade kredit); Docker-läget är inte provat.
+Status: alla tre skripten är körda. `make-film.py` är körd mot Replicate med både FILM och MAXIM;
+Docker-läget (`--film-local`, `--maxim-local`) är inte provat.
+
+Erfarenheter från testet (Rue de Rivoli, Paris, 19 nyckelbilder):
+- Hos Replicate tar FILM ca 13 s beräkningstid per bildpar och MAXIM ca 25 s per bild.
+- MAXIM gav ingen synlig skillnad på Panoramax originalfoton, som redan är skarpa.
+- FILM fungerar bäst när fotona ligger högst ca 2,5 m isär; föremål nära kameran (pelare, bilar,
+  byggnadsställningar) förvrängs ändå i mellanbilderna.

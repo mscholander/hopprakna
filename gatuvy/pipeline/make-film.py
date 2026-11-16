@@ -73,6 +73,9 @@ def run_local(endpoint, inputs):
 def save(output, path):
     if output.startswith('data:'): open(path, 'wb').write(base64.b64decode(output.split(',', 1)[1]))
     else: open(path, 'wb').write(http(output, timeout=600))
+    if path.endswith('.jpg') and open(path, 'rb').read(4) == b'\x89PNG':   # MAXIM svarar med PNG: gör om till JPG
+        tmp = path + '.png'; os.replace(path, tmp)
+        subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-i', tmp, '-q:v', '2', path], check=True); os.remove(tmp)
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -97,7 +100,7 @@ def main():
             if a.maxim_local: save(run_local(a.maxim_local, {'image': data_uri(src), 'model': a.enhance}), dst)
             else: save(run_hosted('maxim', {'image': upload(src), 'model': a.enhance}), dst)
         use = dst if a.enhance else src
-        return data_uri(use) if a.film_local else upload(use)
+        return data_uri(use)   # FILM kräver en bild med filändelse, så den bäddas in i anropet i stället för att laddas upp
     with cf.ThreadPoolExecutor(a.jobs) as ex: urls = list(ex.map(prep, keys))
     print(f'{len(keys)} nyckelbilder klara ({tag}), {time.time() - t0:.0f} s')
 

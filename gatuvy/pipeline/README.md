@@ -2,9 +2,11 @@
 
 Gör en riktig videofil av en rutt, i stället för att sidan tonar mellan foton i webbläsaren.
 
-1. **Nyckelbilder** – `node export-frames.js --from "…" --to "…" --out work/paris --count 11`
+1. **Nyckelbilder** – Panoramax/Mapillary: `node export-frames.js --from "…" --to "…" --out work/paris --count 11`
    Återanvänder Gatuvys bildval och stabilisering, hämtar originalfoton och sparar vyn rakt fram (1280×720).
    Kräver Node och Playwright (`npm i playwright && npx playwright install chromium`).
+   Google Street View: `python3 google-frames.py --from "…" --to "…" --out work/x --gap 11`, sedan
+   `python3 google-frames.py --densify work/x --out work/x2` för att fylla luckor.
 2. **Mellanbilder med FILM** (Googles "Frame Interpolation for Large Motion"), ett av:
    - egen dator utan Docker: `python3 film-local.py work/paris --model film_net_fp32.pt --times 4`
      (PyTorch; ca 18 s per mellanbild på en vanlig processor med 4 kärnor, mycket snabbare med NVIDIA-kort)
@@ -38,5 +40,10 @@ Erfarenheter från testet (Rue de Rivoli, Paris, 19 nyckelbilder):
 - Hel rutt körd: Louvren–Triumfbågen (3,9 km), 365 nyckelbilder med `--spacing 2 --gap 11`, 364 klipp med
   `--engine prunaai/p-video --resolution 720p --draft --speed 4.1`. Alla klipp gick igenom; 14 minuters
   generering med fyra samtidiga körningar och en film på 15 min 41 s.
+- Google Street View (privat test, Googles villkor tillåter inte video av bilderna): `google-frames.py` via
+  Map Tiles API med nyckeln som rubriken `X-Goog-Api-Key` för `tile.googleapis.com`. Det gamla Street View
+  Static API:et läser inte nyckeln från en rubrik. Bara Googles egna bilar tas med (privatpersoners panoramor
+  har andra datum och ibland fel position), och luckor fylls genom att följa panoramornas länkar
+  (`--densify`). Louvren–Triumfbågen: 369 nyckelbilder, ca 4 800 bitar och 600 metadataanrop hos Google.
 - FILM fungerar bäst när fotona ligger högst ca 2,5 m isär; föremål nära kameran (pelare, bilar,
   byggnadsställningar) förvrängs ändå i mellanbilderna.

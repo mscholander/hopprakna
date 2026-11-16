@@ -132,15 +132,67 @@ def view(pano_img, pano_heading, look, W, H, fov=92.0, horizon=0.08, pitch=0.0):
     return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8))
 
 
+def densify(work, out, max_gap, W, H, zoom):
+    """Fyller luckor i en befintlig uppsättning nyckelbilder: från panoramat före en lucka följs Googles egna
+    länkar (pilarna i Street View) mot panoramat efter luckan, och panoramorna däremellan tas med."""
+    meta = json.load(open(os.path.join(work, 'frames.json'))); fr = meta['frames']
+    os.makedirs(out, exist_ok=True)
+    sess = json.loads(http(f'{TILES}/createSession', {'mapType': 'streetview', 'language': 'sv-SE', 'region': 'SE'}))['session']
+    cache = {}
+    def md(pid):
+        if pid not in cache:
+            stats['calls'] += 1; cache[pid] = json.loads(http(f'{TILES}/streetview/metadata?session={sess}&panoId={urllib.parse.quote(pid)}'))
+        return cache[pid]
+    pos = lambda m: [m['lng'], m['lat']]
+    merged, added = [], 0
+    for i, f in enumerate(fr):
+        merged.append(dict(f, _src=os.path.join(work, f['file'])))
+        if i + 1 >= len(fr) or dist((f['lon'], f['lat']), (fr[i + 1]['lon'], fr[i + 1]['lat'])) <= max_gap: continue
+        target = (fr[i + 1]['lon'], fr[i + 1]['lat']); cur = md(f['panoId']); last_kept = (f['lon'], f['lat']); seen = {f['panoId']}
+        for _ in range(12):
+            here = pos(cur); want = bearing(here, target)
+            links = [l for l in cur.get('links', []) if l['panoId'] not in seen]
+            if not links: break
+            l = min(links, key=lambda l: abs((l['heading'] - want + 180) % 360 - 180))
+            if abs((l['heading'] - want + 180) % 360 - 180) > 60: break
+            nxt = md(l['panoId']); seen.add(l['panoId'])
+            if (nxt.get('copyright') or '').split(':')[-1].strip() != 'Google': break
+            if dist(pos(nxt), target) >= dist(here, target) - 1: break        # kommer inte närmare
+            if dist(pos(nxt), target) < 4: break                               # framme vid nästa bild
+            cur = nxt
+            if dist(pos(nxt), last_kept) >= 6:
+                merged.append({'panoId': nxt['panoId'], 'lon': nxt['lng'], 'lat': nxt['lat'], 'pano': True, 'bearing': bearing(pos(nxt), target),
+                               'credit': 'Photo by: Google · Google Street View', 'taken': nxt.get('date', ''), 'seq': nxt['panoId'][:6], '_meta': nxt})
+                last_kept = pos(nxt); added += 1
+            if dist(pos(nxt), target) <= max_gap * 0.6: break
+    # spara i ordning, nya bilder renderas
+    out_frames, prev = [], None
+    for n, f in enumerate(merged):
+        name = f'key_{n:04d}.jpg'; dst = os.path.join(out, name)
+        if '_meta' in f:
+            if not os.path.exists(dst): view(panorama(sess, f['panoId'], f['_meta'], zoom, look=f['bearing']), f['_meta'].get('heading', 0.0), f['bearing'], W, H).save(dst, quality=93)
+        elif not os.path.exists(dst):
+            import shutil; shutil.copy(f['_src'], dst)
+        p = (f['lon'], f['lat']); g = {k: v for k, v in f.items() if not k.startswith('_')}
+        g.update(file=name, gap=dist(prev, p) if prev else 0); out_frames.append(g); prev = p
+    meta['frames'] = out_frames; json.dump(meta, open(os.path.join(out, 'frames.json'), 'w'), indent=1)
+    print(f'{added} panoramor tillagda i luckor, {len(out_frames)} nyckelbilder totalt. Google-anrop: {stats["calls"]} metadata, {stats["tiles"]} bitar.')
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--from', dest='frm', required=True); ap.add_argument('--to', required=True)
+    ap.add_argument('--from', dest='frm'); ap.add_argument('--to')
     ap.add_argument('--out', required=True); ap.add_argument('--gap', type=float, default=11)
     ap.add_argument('--size', default='1280x720'); ap.add_argument('--zoom', type=int, default=3, help='bitarnas detaljnivå (3 ≈ 4096 px bred 360°-bild)')
     ap.add_argument('--radius', type=int, default=25, help='största avstånd (m) från rutten till ett panorama')
     ap.add_argument('--limit', type=int, default=0, help='bara de första N bilderna (för test)')
+    ap.add_argument('--all-owners', action='store_true', help='ta med panoramor som privatpersoner laddat upp (normalt bara Googles egna bilar)')
+    ap.add_argument('--densify', default='', help='fyll luckor i en befintlig mapp (från detta skript) i stället för att börja om')
+    ap.add_argument('--max-gap', type=float, default=14, help='--densify: luckor större än så här (m) fylls')
     a = ap.parse_args()
-    W, H = map(int, a.size.split('x')); os.makedirs(a.out, exist_ok=True)
+    W, H = map(int, a.size.split('x'))
+    if a.densify: return densify(a.densify, a.out, a.max_gap, W, H, a.zoom)
+    os.makedirs(a.out, exist_ok=True)
     A, B = geocode(a.frm), geocode(a.to)
     coords = route(A, B); pts = resample(coords, a.gap)
     if a.limit: pts = pts[:a.limit]
@@ -166,8 +218,15 @@ def main():
         return json.loads(http(f'{TILES}/streetview/metadata?session={sess}&panoId={urllib.parse.quote(pid)}'))
     with cf.ThreadPoolExecutor(6) as ex:
         for pid, m in zip([k[1] for k in keep], ex.map(fetch_meta, [k[1] for k in keep])): meta_cache[pid] = m
+    skipped = 0
     for n, ((pos, brg), pid) in enumerate(keep):
         m = meta_cache[pid]
+        owner = (m.get('copyright') or '').split(':')[-1].strip()
+        mpos = [m.get('lng', pos[0]), m.get('lat', pos[1])]
+        # bara Googles egna bilar (privatpersoners panoramor har andra datum, kameror och ibland fel position),
+        # och bara panoramor som faktiskt ligger vid rutten
+        if (not a.all_owners and owner != 'Google') or dist(mpos, pos) > a.radius + 10:
+            skipped += 1; continue
         name = f'key_{len(frames):04d}.jpg'
         if not os.path.exists(os.path.join(a.out, name)):
             pano = panorama(sess, pid, m, a.zoom, look=brg)
@@ -178,6 +237,7 @@ def main():
                        'taken': m.get('date', ''), 'seq': pid[:6], 'gap': dist(prev_pos, ppos) if prev_pos else 0})
         prev_pos = ppos
         if (n + 1) % 25 == 0: print(f'  {n + 1}/{len(keep)} bilder, {stats["tiles"]} bitar', flush=True)
+    if skipped: print(f'{skipped} panoramor hoppades över (inte Googles egna eller för långt från rutten)')
     json.dump({'from': a.frm, 'to': a.to, 'size': [W, H], 'source': 'google', 'frames': frames}, open(os.path.join(a.out, 'frames.json'), 'w'), indent=1)
     print(f'{len(frames)} nyckelbilder sparade i {a.out}. Google-anrop: {stats["calls"]} metadata/sök, {stats["tiles"]} bitar.')
 

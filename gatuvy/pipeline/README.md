@@ -35,5 +35,8 @@ Erfarenheter från testet (Rue de Rivoli, Paris, 19 nyckelbilder):
 - `prunaai/p-video` (0,02 dollar per sekund i 720p, 0,005 i utkastläge `--draft`) ger rörelse och rena skarvar
   med 3 s klipp: ca 0,06 dollar per klipp i 720p. Utkastläget är mjukare och förvränger småsaker.
   `bytedance/seedance-1.5-pro` är nedlagd hos Replicate.
+- Hel rutt körd: Louvren–Triumfbågen (3,9 km), 365 nyckelbilder med `--spacing 2 --gap 11`, 364 klipp med
+  `--engine prunaai/p-video --resolution 720p --draft --speed 4.1`. Alla klipp gick igenom; 14 minuters
+  generering med fyra samtidiga körningar och en film på 15 min 41 s.
 - FILM fungerar bäst när fotona ligger högst ca 2,5 m isär; föremål nära kameran (pelare, bilar,
   byggnadsställningar) förvrängs ändå i mellanbilderna.

@@ -11,6 +11,22 @@ skyltar, väder och mer ovanpå. Ingen server behövs – lägg mappen på valfr
 Panoramax (öppen, ingen nyckel) och Mapillary (gratis token från mapillary.com/dashboard/developers).
 Standardläget *Kombinerat* tar Panoramax först och fyller luckor med Mapillary.
 
+## Så blir det en ström i stället för ett bildspel
+- **3D-omprojicering:** gatan modelleras som ett "gaturum" (mark + husfasader på vänster och höger sida).
+  Kameran glider med konstant fart mellan fotopunkterna och varje foto läggs på modellen, så vägmarkeringar
+  strömmar under kameran och fasader glider förbi med äkta parallax. I fotopunkterna visas fotot exakt.
+- **Självkalibrering:** vid varje bildbyte provas olika avstånd till fasaderna (4–60 m per sida, 60 m = öppen
+  plats) och kamerahöjder (1,4–2,7 m); modellen där de två fotona stämmer bäst används. Sökningen sprids över
+  flera bildrutor och modellen glider mjukt mot det nya värdet, så den orsakar inga ryck.
+- **Kort övertoning:** fotona blandas bara mitt på sträckan; där ett foto bara visar bilens tak tar det andra över.
+- **Lugn kamera och lugna bubblor:** riktningen följer vägen med lite eftersläpning, och faktabubblor glider,
+  tonas in och ut med avståndet och byter inte plats i onödan.
+- **Skarpt utan flimmer:** bilderna förberäknas i flera storlekar (mipmaps), avkodas i bakgrunden och hämtas
+  åtta steg i förväg.
+
+Kvarstående: bilar och människor nära kameran kan dras ut något i övergångarna, eftersom modellen bara känner
+till mark och fasader och de dessutom har flyttat sig mellan fotona.
+
 ## Upplevelse (panelen → Upplevelse)
 | Funktion | Vad den gör | Datakälla |
 |---|---|---|

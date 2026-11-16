@@ -29,6 +29,7 @@ const FEATURES = [
   ['quiz', 'Gissa staden', false],
   ['votes', 'Rösta med mobilen', false],
 ];
+const NOT_IN_X = new Set();   // tekniska val som inte styrs av x= i adressen
 const DEFAULTS = { mode: 'route', tourMin: 10, epoch: 'any', lang: 'sv', home: '', homeName: '', sponsors: '' };
 for (const [k, , on] of FEATURES) DEFAULTS[k] = on;
 
@@ -37,14 +38,14 @@ function loadOpts() {
   try { saved = JSON.parse(localStorage.getItem('gvOpts') || '{}'); } catch (e) { /* ignore */ }
   const o = { ...DEFAULTS, ...saved };
   // Adressen kan styra allt, så att en kioskskärm kan startas med en enda länk.
-  if (qs.has('x')) { const on = new Set(qs.get('x').split(',')); for (const [k] of FEATURES) o[k] = on.has(k); }
+  if (qs.has('x')) { const on = new Set(qs.get('x').split(',')); for (const [k] of FEATURES) if (!NOT_IN_X.has(k)) o[k] = on.has(k); }
   for (const k of ['mode', 'epoch', 'lang', 'home', 'homeName', 'sponsors']) if (qs.has(k)) o[k] = qs.get(k);
   if (qs.has('tour')) o.tourMin = Math.max(1, parseFloat(qs.get('tour')) || DEFAULTS.tourMin);
   return o;
 }
 function saveOpts() { try { localStorage.setItem('gvOpts', JSON.stringify(GV.opts)); } catch (e) { /* ignore */ } }
 GV.urlParams = () => {
-  const o = GV.opts, p = { x: FEATURES.filter(([k]) => o[k]).map(([k]) => k).join(',') };
+  const o = GV.opts, p = { x: FEATURES.filter(([k]) => o[k] && !NOT_IN_X.has(k)).map(([k]) => k).join(',') };
   for (const k of ['mode', 'epoch', 'lang', 'home', 'homeName', 'sponsors']) if (o[k] && o[k] !== DEFAULTS[k]) p[k] = o[k];
   if (o.tourMin !== DEFAULTS.tourMin) p.tour = o.tourMin;
   return p;
@@ -180,9 +181,9 @@ const T = {
 // ---------------------------------------------------------------------------------------------
 const CSS = `
 #gv-layer { position: fixed; inset: 0; pointer-events: none; z-index: 2; overflow: hidden; }
-.gv-b { position: absolute; transform: translate(-50%, -100%); max-width: 240px; padding: 6px 10px 7px; border-radius: 10px;
+.gv-b { position: absolute; left: 0; top: 0; transform: translate(-50%, -100%); max-width: 240px; padding: 6px 10px 7px; border-radius: 10px;
   background: rgba(14,14,18,.78); border: 1px solid rgba(255,255,255,.25); color: #fff; font-size: 13px; line-height: 1.25;
-  box-shadow: 0 4px 14px rgba(0,0,0,.35); transition: opacity .35s; white-space: normal; }
+  box-shadow: 0 4px 14px rgba(0,0,0,.35); white-space: normal; will-change: transform, opacity; }
 .gv-b::after { content: ''; position: absolute; left: 50%; bottom: -7px; margin-left: -7px; border: 7px solid transparent;
   border-bottom: 0; border-top-color: rgba(14,14,18,.78); }
 .gv-b b { display: block; font-size: 14px; } .gv-b span { display: block; color: #cfd3dc; font-size: 12px; }
@@ -417,11 +418,15 @@ const homeLine = p => {
 // ---------------------------------------------------------------------------------------------
 // Faktabubblor som sitter fast i bilden
 // ---------------------------------------------------------------------------------------------
+// Varje bubbla har ett eget läge som glider mot målet (ingen bubbla hoppar), tonas in och ut med
+// avståndet och vid bildkanten, och de som redan syns får företräde så att de inte byts i onödan.
 const bubbleEls = new Map();
-function clearBubbles() { for (const d of bubbleEls.values()) d.remove(); bubbleEls.clear(); T.bubbles = []; }
+function clearBubbles() { for (const b of bubbleEls.values()) b.el.remove(); bubbleEls.clear(); T.bubbles = []; }
 
 function placeBubbles(v) {
   const layer = el('gv-layer'); if (!layer) return;
+  const now = performance.now(), dt = Math.min(0.1, Math.max(0.001, (now - (T.bubT || now - 16)) / 1000)); T.bubT = now;
+  const kPos = 1 - Math.exp(-dt / 0.22), kOp = 1 - Math.exp(-dt / 0.35);
   const Wd = innerWidth, Hd = innerHeight, half = v.hfov / 2, tanHalf = Math.tan(rad(half));
   const cand = [];
   for (const p of T.pois) {
@@ -430,8 +435,10 @@ function placeBubbles(v) {
     const maxD = p.sponsor ? 260 : p.imp >= T.stopImp ? 380 : 170;
     if (d > maxD || d < 10) continue;
     const a = signed(bearing(v.pos, p.p), v.W);
-    if (Math.abs(a) > half - 3) continue;
-    cand.push({ p, d, a, sc: (p.sponsor ? 400 : 15 + p.imp) / (d + 40) });
+    if (Math.abs(a) > half - 2) continue;
+    const shown = bubbleEls.get(p.id);
+    const sc = (p.sponsor ? 400 : 15 + p.imp) / (d + 40) * (shown && !shown.dead ? 1.8 : 1);   // företräde för de som syns
+    cand.push({ p, d, a, maxD, sc });
   }
   cand.sort((x, y) => y.sc - x.sc);
   const show = cand.slice(0, Wd < 600 ? 2 : 3), placed = [];
@@ -447,23 +454,28 @@ function placeBubbles(v) {
   const keep = new Set();
   for (const c of placed) {
     const p = c.p; keep.add(p.id);
-    let d = bubbleEls.get(p.id);
-    if (!d) {
-      d = document.createElement('div'); d.className = 'gv-b' + (p.sponsor ? ' sp' : ''); d.style.opacity = 0;
+    let b = bubbleEls.get(p.id);
+    if (!b) {
+      const d = document.createElement('div'); d.className = 'gv-b' + (p.sponsor ? ' sp' : ''); d.style.opacity = 0;
       const desc = p.sponsor ? p.desc : (p.desc || '').replace(/^./, s => s.toUpperCase());
       d.innerHTML = (p.sponsor ? '<em>Tips</em>' : '') + `<b>${esc(p.title)}</b>` + (desc ? `<span>${esc(desc)}</span>` : '')
         + (homeLine(p) ? `<i>${esc(homeLine(p))}</i>` : '');
-      layer.appendChild(d); bubbleEls.set(p.id, d);
-      requestAnimationFrame(() => { d.style.opacity = 1; });
+      layer.appendChild(d);
+      b = { el: d, x: c.x, y: c.y + 12, o: 0, s: 0.9, p };
+      bubbleEls.set(p.id, b);
       maybeSpeakBubble(c);
     }
-    const edge = Math.abs(c.a) / (v.hfov / 2), scale = clampv(1.18 - c.d / 420, 0.78, 1.12);
-    d.style.left = c.x.toFixed(1) + 'px'; d.style.top = c.y.toFixed(1) + 'px';
-    d.style.transform = `translate(-50%, -100%) scale(${scale.toFixed(3)})`;
-    d.style.opacity = (1 - Math.pow(edge, 6)).toFixed(2);
+    const edge = Math.abs(c.a) / half, near = clampv((c.maxD - c.d) / (0.25 * c.maxD), 0, 1);
+    b.tx = c.x; b.ty = c.y; b.to = (1 - Math.pow(edge, 6)) * near; b.ts = clampv(1.18 - c.d / 420, 0.78, 1.12); b.dead = false;
   }
-  for (const [id, d] of bubbleEls) if (!keep.has(id)) { bubbleEls.delete(id); d.style.opacity = 0; setTimeout(() => d.remove(), 400); }
-  T.bubbles = placed.map(c => ({ title: c.p.title, desc: c.p.desc, sp: c.p.sponsor, xf: c.x / Wd, yf: c.y / Hd }));
+  for (const [id, b] of bubbleEls) {
+    if (!keep.has(id)) { b.dead = true; b.to = 0; }
+    b.x += (b.tx - b.x) * kPos; b.y += (b.ty - b.y) * kPos; b.s += (b.ts - b.s) * kPos; b.o += (b.to - b.o) * kOp;
+    if (b.dead && b.o < 0.02) { b.el.remove(); bubbleEls.delete(id); continue; }
+    b.el.style.transform = `translate(${b.x.toFixed(1)}px, ${b.y.toFixed(1)}px) translate(-50%, -100%) scale(${b.s.toFixed(3)})`;
+    b.el.style.opacity = b.o.toFixed(3);
+  }
+  T.bubbles = [...bubbleEls.values()].filter(b => b.o > 0.05).map(b => ({ title: b.p.title, desc: b.p.desc, sp: b.p.sponsor, xf: b.x / Wd, yf: b.y / Hd, o: b.o }));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -843,12 +855,13 @@ GV.on('compose', ({ ctx: c, W, H }) => {
   const fit = (s, max) => { while (s.length > 3 && c.measureText(s).width > max) s = s.slice(0, -2); return s; };
   c.shadowBlur = 0; c.textBaseline = 'alphabetic';
   if (!T.quizHiding && GV.opts.bubbles) for (const b of T.bubbles) {
-    const x = b.xf * W, y = b.yf * H; c.font = '600 15px system-ui, sans-serif';
+    const x = b.xf * W, y = b.yf * H; c.globalAlpha = b.o ?? 1; c.font = '600 15px system-ui, sans-serif';
     const t1 = fit(b.title, 240), w1 = c.measureText(t1).width; c.font = '12px system-ui, sans-serif';
     const t2 = b.desc ? fit(b.desc, 240) : '', w = Math.max(w1, c.measureText(t2).width) + 20, h = t2 ? 46 : 30;
     box(x - w / 2, y - h, w, h, b.sp ? 'rgba(40,30,4,.86)' : 'rgba(14,14,18,.8)');
     c.fillStyle = '#fff'; c.font = '600 15px system-ui, sans-serif'; c.fillText(t1, x - w / 2 + 10, y - h + 20);
     if (t2) { c.fillStyle = '#cfd3dc'; c.font = '12px system-ui, sans-serif'; c.fillText(t2, x - w / 2 + 10, y - h + 38); }
+    c.globalAlpha = 1;
   }
   if (GV.opts.sign && T.sign && !T.quizHiding) {
     c.font = '600 20px system-ui, sans-serif'; const w = Math.max(200, c.measureText(T.sign.road).width + 40);

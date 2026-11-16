@@ -5,14 +5,16 @@
 //
 // Skriptet öppnar Gatuvy-sidan i en osynlig webbläsare (Playwright) och återanvänder dess bildval,
 // stabilisering och 360°-omprojicering. Bilderna hämtas i originalupplösning för bästa skärpa.
-// Flaggor: --spacing <meter> hur tätt rutten provtas (4; välj 2 för att få med alla foton), --start <index> första bild, --count <antal>, --step <n> var n:te bild, --size 1280x720,
+// Flaggor: --gap <meter> jämnt avstånd mellan nyckelbilderna (t.ex. 11; använd med --spacing 2),
+//          --spacing <meter> hur tätt rutten provtas (4; välj 2 för att få med alla foton), --start <index> första bild, --count <antal>, --step <n> var n:te bild, --size 1280x720,
 //          --provider both|panoramax|mapillary, --token <Mapillary-token>, --curl-relay (hämta rutt via curl)
 const fs = require('fs'), path = require('path'), http = require('http'), cp = require('child_process');
 const { chromium } = require('playwright');
 const arg = (k, d) => { const i = process.argv.indexOf('--' + k); return i < 0 ? d : (process.argv[i + 1] && !process.argv[i + 1].startsWith('--') ? process.argv[i + 1] : true); };
 const from = arg('from'), to = arg('to'), out = arg('out', 'work/route');
 if (!from || !to) { console.error('Ange --from och --to'); process.exit(1); }
-const start = +arg('start', 0), count = +arg('count', 11), step = +arg('step', 1);
+const gap = +arg('gap', 0);   // meter mellan nyckelbilderna (0 = var --step:e bild)
+const start = +arg('start', 0), count = +arg('count', gap ? 1e9 : 11), step = +arg('step', 1);
 const [W, H] = String(arg('size', '1280x720')).split('x').map(Number);
 const provider = arg('provider', arg('token') ? 'both' : 'panoramax');
 
@@ -40,15 +42,23 @@ const server = http.createServer((q, r) => {
     if (arg('token') === 'proxy') await page.route('https://graph.mapillary.com/**', relay(true));
   }
   await page.goto(`http://127.0.0.1:${port}/index.html?x=`);
-  const meta = await page.evaluate(async ({ from, to, provider, token, start, count, step, spacing }) => {
+  const meta = await page.evaluate(async ({ from, to, provider, token, start, count, step, spacing, gap }) => {
     if (token) document.getElementById('token').value = token;
     const a = await geocode(from); await new Promise(r => setTimeout(r, 1100)); const b = await geocode(to);
     const r = await route(a, b), samples = resample(r.geometry.coordinates, spacing);
     const { images } = await fetchImagesAlong(samples, provider, () => {});
     const { frames, coverage } = buildFrames(samples, images);
-    window.__frames = frames.filter((_, i) => i >= start && (i - start) % step === 0).slice(0, count);
+    let picked = frames.filter((_, i) => i >= start && (i - start) % step === 0);
+    if (gap) {   // jämnt avstånd: ta nästa bild som ligger närmast "gap" meter från den förra valda
+      const all = frames.slice(start); picked = [all[0]];
+      for (let i = 1; i < all.length; i++) {
+        const last = picked[picked.length - 1], d = dist(last.im.p, all[i].im.p), dn = i + 1 < all.length ? dist(last.im.p, all[i + 1].im.p) : 1e9;
+        if (d >= gap || Math.abs(dn - gap) > Math.abs(d - gap) && dn > gap) picked.push(all[i]);
+      }
+    }
+    window.__frames = picked.slice(0, count);
     return { km: r.distance / 1000, total: frames.length, coverage, picked: window.__frames.length };
-  }, { from, to, provider, token: arg('token', ''), start, count, step, spacing: +arg('spacing', 4) });
+  }, { from, to, provider, token: arg('token', ''), start, count, step, spacing: +arg('spacing', 4), gap });
   console.log(`Rutt ${meta.km.toFixed(1)} km, ${meta.total} bilder (täckning ${Math.round(meta.coverage * 100)} %), exporterar ${meta.picked}`);
   fs.mkdirSync(out, { recursive: true });
   const list = [];
@@ -61,7 +71,7 @@ const server = http.createServer((q, r) => {
       draw(f, null, 0, f.im.pano ? 1 : 1.3, 1, f.brg);
       const data = document.getElementById('view').toDataURL('image/jpeg', 0.95);
       if (prev && prev.ok && i > 1) { const pp = fr[i - 2]; if (pp.tex) { gl.deleteTexture(pp.tex); pp.tex = null; pp.img = null; } }
-      return { data, lon: f.im.p[0], lat: f.im.p[1], bearing: f.brg, pano: f.im.pano, credit: f.im.credit, taken: f.im.t, src: f.im.hd,
+      return { data, lon: f.im.p[0], lat: f.im.p[1], bearing: f.brg, pano: f.im.pano, credit: f.im.credit, taken: f.im.t, src: f.im.hd, seq: f.im.seq,
         gap: prev ? dist(prev.im.p, f.im.p) : 0 };
     }, i);
     if (!r) { console.log(`  bild ${i}: kunde inte laddas, hoppar över`); continue; }

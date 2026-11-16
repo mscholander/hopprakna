@@ -32,7 +32,7 @@ ENGINES = {
     'bytedance/seedance-1.5-pro': lambda a, p, first, last: {'image': first, 'last_frame_image': last, 'prompt': p, 'resolution': a.resolution,
                                                               'duration': max(4, int(a.seconds)), 'generate_audio': False, 'seed': a.seed},
     'prunaai/p-video': lambda a, p, first, last: {'image': first, 'last_frame_image': last, 'prompt': p, 'resolution': a.resolution,
-                                                  'duration': max(1, int(a.seconds)), 'fps': 24, 'save_audio': False, 'prompt_upsampling': False, 'seed': a.seed, 'draft': a.draft},
+                                                  'duration': max(1, min(20, int(a.seconds))), 'fps': 24, 'save_audio': False, 'prompt_upsampling': False, 'seed': a.seed, 'draft': a.draft},
     'wan-video/wan-2.7-i2v': lambda a, p, first, last: {'first_frame': first, 'last_frame': last, 'prompt': p, 'resolution': a.resolution,
                                                          'duration': int(a.seconds), 'seed': a.seed, 'enable_prompt_expansion': False},
 }
@@ -108,6 +108,7 @@ def main():
     ap.add_argument('--resolution', default='720p'); ap.add_argument('--frames', type=int, default=81, help='bildrutor per klipp för generativa modeller')
     ap.add_argument('--seed', type=int, default=1); ap.add_argument('--seconds', type=float, default=5, help='kliplängd för modeller som anger tid')
     ap.add_argument('--draft', action='store_true', help='utkastläge (billigare, lägre kvalitet) för modeller som har det')
+    ap.add_argument('--speed', type=float, default=0, help='jämn fart i m/s: varje klipp spelas på (avstånd mellan fotona)/fart sekunder, t.ex. 4.1 = 15 km/h')
     ap.add_argument('--clip-seconds', type=float, default=0, help='spela varje klipp på så här många sekunder i den färdiga filmen (0 = alla bildrutor i --fps)')
     ap.add_argument('--fps', type=int, default=30); ap.add_argument('--jobs', type=int, default=3)
     ap.add_argument('--film-local', default=''); ap.add_argument('--maxim-local', default='')
@@ -136,12 +137,25 @@ def main():
     if gen and a.engine not in ENGINES: sys.exit('Okänd modell. Kända: ' + ', '.join(ENGINES))
     label = ('gen-' + a.engine.split('/')[-1] + ('-' + a.resolution if 'resolution' in ENGINES[a.engine](a, '', '', '') else '') + ('-draft' if a.draft else '')) if gen else f't{a.times}'
     prompt = open(a.prompt).read().strip() if gen else ''
+    gaps = [f.get('gap', 0) for f in meta['frames']][1:]
+    # hur länge varje klipp ska synas i filmen: jämn fart om --speed är satt, annars --clip-seconds
+    play = [max(0.4, g / a.speed) if a.speed and g else a.clip_seconds for g in gaps]
+    failed = []
     def clip(i):
         dst = os.path.join(d, f'clip_{i:04d}_{label}.mp4')
         if not os.path.exists(dst):
             if gen:   # samma masterprompt för alla klipp; startbild = detta foto, slutbild = nästa
-                out = run_hosted(a.engine, ENGINES[a.engine](a, prompt, urls[i], urls[i + 1]))
-                save(out if isinstance(out, str) else out[0], dst)
+                import copy, math
+                ai = copy.copy(a)
+                if a.speed: ai.seconds = min(5, max(1, math.ceil(play[i])))   # generera minst så långt klipp som ska visas
+                for attempt in range(3):
+                    try:
+                        out = run_hosted(a.engine, ENGINES[a.engine](ai, prompt, urls[i], urls[i + 1]))
+                        save(out if isinstance(out, str) else out[0], dst); break
+                    except Exception as e:
+                        if attempt == 2: failed.append(i); print(f'klipp {i} misslyckades: {str(e)[:120]}', flush=True); return None
+                        time.sleep(5)
+                if (i + 1) % 25 == 0: print(f'  {i + 1} klipp påbörjade, {time.time() - t0:.0f} s', flush=True)
             else:
                 inp = {'frame1': urls[i], 'frame2': urls[i + 1], 'times_to_interpolate': a.times}
                 save(run_local(a.film_local, inp) if a.film_local else run_hosted('film', inp), dst)
@@ -149,20 +163,33 @@ def main():
     with cf.ThreadPoolExecutor(a.jobs) as ex: clips = list(ex.map(clip, range(len(keys) - 1)))
     print(f'{len(clips)} klipp klara, {time.time() - t0:.0f} s')
 
-    # 3. foga ihop: varje klipp slutar på nästa klipps första bild, så den dubbla bilden tas bort
+    # 3. foga ihop. Varje klipp görs först om till samma format och rätt längd (första bildrutan tas bort,
+    #    den är samma som förra klippets sista), sedan läggs delarna efter varandra utan omkodning.
     out = a.out or os.path.join(a.work, f'film_{tag}_{label}.mp4')
-    args = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y']
-    for c in clips: args += ['-i', c]
-    n = len(clips)
-    # alla bildrutor spelas i a.fps (generativa klipp levereras i 16 bilder/s och blir då snabbare och mjukare)
-    def retime(c):   # antal bildrutor i klippet -> faktor som ger önskad längd
-        nb = int(subprocess.run(['ffprobe', '-v', 'error', '-count_frames', '-select_streams', 'v', '-show_entries', 'stream=nb_read_frames', '-of', 'csv=p=0', c],
-                                capture_output=True, text=True).stdout.strip() or 0)
-        return f'setpts=N*{a.clip_seconds / max(1, nb - 1):.6f}/TB' if a.clip_seconds else f'setpts=N/({a.fps}*TB)'
-    parts = ''.join(f'[{i}:v]{"trim=start_frame=1," if i else ""}{retime(c)},fps={a.fps}[v{i}];' for i, c in enumerate(clips))
-    args += ['-filter_complex', parts + ''.join(f'[v{i}]' for i in range(n)) + f'concat=n={n}:v=1[o]', '-map', '[o]',
-             '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '18', '-movflags', '+faststart', out]
-    subprocess.run(args, check=True)
+    W, H = meta.get('size', [1280, 720]); H -= H % 2
+    def frames_in(c):
+        return int(subprocess.run(['ffprobe', '-v', 'error', '-count_frames', '-select_streams', 'v', '-show_entries', 'stream=nb_read_frames', '-of', 'csv=p=0', c],
+                                  capture_output=True, text=True).stdout.strip() or 0)
+    def part(i):
+        dst = os.path.join(d, f'part_{i:04d}_{label}.ts'); c = clips[i]; secs = play[i] if (a.speed or a.clip_seconds) else 0
+        enc = ['-r', str(a.fps), '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '18', '-preset', 'veryfast', '-an', '-f', 'mpegts', dst]
+        base = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y']
+        if c is None:   # klippet gick inte att generera: vanlig övertoning mellan de två fotona i stället
+            t = secs or 2.7; k0, k1 = (os.path.join(d if a.enhance else a.work, keys[j]) for j in (i, i + 1))
+            subprocess.run(base + ['-loop', '1', '-t', f'{t}', '-i', k0, '-loop', '1', '-t', f'{t}', '-i', k1, '-filter_complex',
+                                   f'[0]scale={W}:{H},fps={a.fps}[x];[1]scale={W}:{H},fps={a.fps}[y];[x][y]xfade=transition=fade:duration={t}:offset=0'] + enc, check=True)
+            return dst
+        nb = frames_in(c); pts = f'setpts=N*{secs / max(1, nb - 1):.6f}/TB' if secs else f'setpts=N/({a.fps}*TB)'
+        vf = f'{pts},fps={a.fps},scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H}' + (',trim=start_frame=1,setpts=PTS-STARTPTS' if i else '')
+        subprocess.run(base + ['-i', c, '-vf', vf] + enc, check=True)
+        return dst
+    with cf.ThreadPoolExecutor(4) as ex: parts = list(ex.map(part, range(len(clips))))
+    lst = os.path.join(d, f'parts_{label}.txt'); open(lst, 'w').write(''.join(f"file '{os.path.abspath(p)}'\n" for p in parts))
+    subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-f', 'concat', '-safe', '0', '-i', lst, '-c', 'copy', '-movflags', '+faststart', out], check=True)
+    # fotograferna ska anges (bilderna är öppet licensierade)
+    names = sorted({f.get('credit', '') for f in meta['frames'] if f.get('credit')})
+    open(os.path.splitext(out)[0] + '_credits.txt', 'w').write('Gatubilder:\n' + '\n'.join('  © ' + n for n in names) + '\n')
+    if failed: print(f'{len(failed)} klipp gick inte att generera och ersattes med övertoning: {sorted(failed)}')
     print(f'Film: {out}')
     if stats['runs']: print(f'Replicate: {stats["runs"]} körningar, {stats["seconds"]:.0f} s beräkningstid')
 

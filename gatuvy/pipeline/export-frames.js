@@ -5,7 +5,7 @@
 //
 // Skriptet öppnar Gatuvy-sidan i en osynlig webbläsare (Playwright) och återanvänder dess bildval,
 // stabilisering och 360°-omprojicering. Bilderna hämtas i originalupplösning för bästa skärpa.
-// Flaggor: --start <index> första bild, --count <antal>, --step <n> var n:te bild, --size 1280x720,
+// Flaggor: --spacing <meter> hur tätt rutten provtas (4; välj 2 för att få med alla foton), --start <index> första bild, --count <antal>, --step <n> var n:te bild, --size 1280x720,
 //          --provider both|panoramax|mapillary, --token <Mapillary-token>, --curl-relay (hämta rutt via curl)
 const fs = require('fs'), path = require('path'), http = require('http'), cp = require('child_process');
 const { chromium } = require('playwright');
@@ -40,15 +40,15 @@ const server = http.createServer((q, r) => {
     if (arg('token') === 'proxy') await page.route('https://graph.mapillary.com/**', relay(true));
   }
   await page.goto(`http://127.0.0.1:${port}/index.html?x=`);
-  const meta = await page.evaluate(async ({ from, to, provider, token, start, count, step }) => {
+  const meta = await page.evaluate(async ({ from, to, provider, token, start, count, step, spacing }) => {
     if (token) document.getElementById('token').value = token;
     const a = await geocode(from); await new Promise(r => setTimeout(r, 1100)); const b = await geocode(to);
-    const r = await route(a, b), samples = resample(r.geometry.coordinates, 4);
+    const r = await route(a, b), samples = resample(r.geometry.coordinates, spacing);
     const { images } = await fetchImagesAlong(samples, provider, () => {});
     const { frames, coverage } = buildFrames(samples, images);
     window.__frames = frames.filter((_, i) => i >= start && (i - start) % step === 0).slice(0, count);
     return { km: r.distance / 1000, total: frames.length, coverage, picked: window.__frames.length };
-  }, { from, to, provider, token: arg('token', ''), start, count, step });
+  }, { from, to, provider, token: arg('token', ''), start, count, step, spacing: +arg('spacing', 4) });
   console.log(`Rutt ${meta.km.toFixed(1)} km, ${meta.total} bilder (täckning ${Math.round(meta.coverage * 100)} %), exporterar ${meta.picked}`);
   fs.mkdirSync(out, { recursive: true });
   const list = [];

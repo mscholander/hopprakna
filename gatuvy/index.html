@@ -395,12 +395,7 @@ function buildFrames(samples, images) {
   return { frames, coverage: covered / samples.length, mixShare: frames.length ? fromMly / frames.length : 0 };
 }
 
-// ---------- WebGL renderer: the photos are laid onto a simple 3D model of the street ----------
-// The street is modelled as a "canyon": flat ground at camera height and two house fronts along the road.
-// For every screen pixel we follow the ray from the moving virtual camera to that model, and look the
-// hit point up in each photo from the spot where that photo was taken. At a photo's own spot this gives
-// exactly the photo; in between, road markings stream under the camera and facades glide past with
-// real parallax, and the two photos line up much better than when they are only zoomed and faded.
+// ---------- WebGL renderer: cross-fades two images, re-projects 360° panoramas ----------
 const canvas = $('view'), gl = canvas.getContext('webgl2', { antialias: false, alpha: false });
 const VS = `#version 300 es
 in vec2 a; out vec2 v; void main(){ v = a; gl_Position = vec4(a, 0., 1.); }`;
@@ -408,55 +403,25 @@ const FS = `#version 300 es
 precision highp float;
 in vec2 v; out vec4 o;
 uniform sampler2D t0, t1;
-uniform vec4 m0, m1;      // x: isPano, y: yaw offset (rad, photo centre relative to north), z: photo spot along the road (m), w: image aspect
-uniform vec2 o0, o1;      // stabilisation: flat = picture shift, 360° = (0, pitch)
-uniform float mixv, aspect, hasB;
-uniform vec4 cam;         // x: view heading (rad), y: tan(half horizontal view), z: camera spot along the road (m), w: road bearing (rad)
-uniform vec3 geo;         // x: camera height above the ground (m), y: distance to the house fronts on the left, z: on the right (m)
+uniform vec4 m0, m1;      // x: isPano, y: yaw, z: zoom, w: image aspect
+uniform vec2 o0, o1;      // stabilisation offset (pano: y = pitch, flat: image-fraction shift)
+uniform float mixv, aspect;
 const float PI = 3.14159265;
-const float HOR = .08;    // screen height of the horizon
-const float FLAT_T = .7002075; // tan(35°): flat photos are assumed to cover 70° horizontally
-vec3 viewRay() {          // world direction (x east, y north, z up)
+const float HOR = .08;    // screen height of the horizon / vanishing point; all zooming happens around it
+vec3 samp(sampler2D t, vec4 m, vec2 off) {
   vec2 p = v - vec2(0., HOR);
-  vec3 c = normalize(vec3(p.x * cam.y, 1., p.y * cam.y / aspect));
-  float s = sin(cam.x), k = cos(cam.x);
-  return vec3(c.x * k + c.y * s, -c.x * s + c.y * k, c.z);
-}
-float hitDist(vec3 d) {   // distance along the ray to the ground or a house front
-  float sb = sin(cam.w), cb = cos(cam.w), lat = d.x * cb - d.y * sb, t = 400.;
-  if (d.z < -1e-4) t = min(t, geo.x / -d.z);
-  if (lat < -1e-4) t = min(t, geo.y / -lat);
-  if (lat > 1e-4) t = min(t, geo.z / lat);
-  return t;
-}
-// colour of photo tx for the scene point P (relative to the virtual camera); .a = how usable it is there
-vec4 samp(sampler2D tx, vec4 m, vec2 off, vec3 P) {
-  vec3 Q = P - vec3(sin(cam.w), cos(cam.w), 0.) * (m.z - cam.z);   // the same point, seen from the photo's spot
-  float brg = atan(Q.x, Q.y), el = atan(Q.z, length(Q.xy));
   if (m.x > .5) {
-    float lon = brg + m.y;
-    // straight down is the car roof / tripod: let the other photo take over there
-    return vec4(texture(tx, vec2(lon / (2. * PI) + .5, .5 - (el + off.y) / PI), -.5).rgb, smoothstep(-.42, -.26, el));
+    float f = tan(radians(46.)) / m.z;                  // ~92° horizontal field of view at zoom 1
+    vec3 d = normalize(vec3(p.x * f, p.y * f / aspect + off.y, 1.));
+    float lon = atan(d.x, d.z) + m.y, lat = asin(d.y);
+    return texture(t, vec2(lon / (2. * PI) + .5, .5 - lat / PI)).rgb;
   }
-  float rel = brg + m.y;
-  vec3 dc = vec3(sin(rel) * cos(el), cos(rel) * cos(el), sin(el));
-  if (dc.y < .05) return vec4(0.);
-  vec2 q = vec2(dc.x / dc.y / FLAT_T, dc.z / dc.y / (FLAT_T / m.w));
-  float inside = (1. - smoothstep(.9, 1., abs(q.x))) * (1. - smoothstep(.9, 1., abs(q.y)));
-  vec2 uv = q * .5 + .5;
-  return vec4(texture(tx, clamp(vec2(uv.x + off.x, 1. - uv.y + off.y), 0., 1.), -.5).rgb, inside);
+  vec2 s = aspect > m.w ? vec2(1., m.w / aspect) : vec2(aspect / m.w, 1.);   // "cover" fit
+  vec2 uv = p * s / m.z * .5 + .5;
+  return texture(t, clamp(vec2(uv.x + off.x, 1. - uv.y + off.y), 0., 1.)).rgb;
 }
 void main() {
-  vec3 d = viewRay(), P = d * hitDist(d);
-  vec4 A = samp(t0, m0, o0, P);
-  vec3 c = A.rgb;
-  if (hasB > .5) {
-    vec4 B = samp(t1, m1, o1, P);
-    // blend by time, but where one photo only shows the car roof (or is outside the frame) the other takes over
-    float wa = (1. - mixv) * A.a, wb = mixv * B.a;
-    wa += .5 * A.a * (1. - B.a) + .002; wb += .5 * B.a * (1. - A.a) * step(wa, .3) + .002;
-    c = (A.rgb * wa + B.rgb * wb) / (wa + wb);
-  }
+  vec3 c = mix(samp(t0, m0, o0), samp(t1, m1, o1), mixv);
   float vig = smoothstep(1.5, .5, length(v));
   o = vec4(c * mix(.8, 1., vig), 1.);
 }`;
@@ -471,104 +436,35 @@ function initGL() {
   gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
   gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
-  for (const n of ['t0', 't1', 'm0', 'm1', 'o0', 'o1', 'mixv', 'aspect', 'hasB', 'cam', 'geo']) U[n] = gl.getUniformLocation(prog, n);
+  for (const n of ['t0', 't1', 'm0', 'm1', 'o0', 'o1', 'mixv', 'aspect']) U[n] = gl.getUniformLocation(prog, n);
   gl.uniform1i(U.t0, 0); gl.uniform1i(U.t1, 1);
 }
 function makeTexture(img) {
-  const max = gl.getParameter(gl.MAX_TEXTURE_SIZE), iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height;
-  let src = img;
-  if (iw > max) { // downscale oversized panoramas
-    const c = document.createElement('canvas'); c.width = max; c.height = Math.round(ih * max / iw);
+  const max = gl.getParameter(gl.MAX_TEXTURE_SIZE); let src = img;
+  if (img.naturalWidth > max) { // downscale oversized panoramas
+    const c = document.createElement('canvas'); c.width = max; c.height = Math.round(img.naturalHeight * max / img.naturalWidth);
     c.getContext('2d').drawImage(img, 0, 0, c.width, c.height); src = c;
   }
-  gl.activeTexture(gl.TEXTURE0);
   const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, src);
-  gl.generateMipmap(gl.TEXTURE_2D);   // smaller copies: no shimmer in fine detail
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   return t;
 }
-// The camera: where it looks (W, compass degrees), how wide (tanHalf), where it stands along the road (s, metres
-// from the current photo), the road's bearing (beta) and the street model (h, w). Each frame f carries f._s.
-const PANO_T = Math.tan(rad(46)), FLAT_VIEW_T = Math.tan(rad(35)) / 1.3;
-let street = { h: 2.4, l: 9, r: 9 };
-// Draw frame a (and b blended in with weight mixv) as seen by the camera. opt.target: draw into the probe.
-function draw(a, b, mixv, view, opt = {}) {
+// Draw frame a (and b on top with opacity mixv). W = compass direction (deg) the camera looks in.
+function draw(a, b, mixv, za, zb, W) {
   let w = canvas.clientWidth * Math.min(devicePixelRatio, 2) | 0, h = canvas.clientHeight * Math.min(devicePixelRatio, 2) | 0;
   if (vfs.fs) { w = vfs.W; h = vfs.H; }   // iPhone fullscreen video is always landscape 16:9
   if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
-  const asp = w / h;
-  if (opt.target) { gl.bindFramebuffer(gl.FRAMEBUFFER, opt.target.fb); w = opt.target.w; h = opt.target.h; }
   gl.viewport(0, 0, w, h);
-  const set = (unit, um, uo, f) => { gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, f.tex);
-    gl.uniform4f(um, f.im.pano ? 1 : 0, f.im.pano ? (f.cx || 0) - rad(f.im.az || 0) : -rad(f.im.az || 0), f._s || 0, f.aspect || 1.5);
-    gl.uniform2f(uo, f.im.pano ? 0 : f.cx || 0, f.cy || 0); };
-  set(0, U.m0, U.o0, a); set(1, U.m1, U.o1, b || a);
-  const g = opt.street || street;
-  gl.uniform4f(U.cam, rad(view.W), view.tanHalf, view.s || 0, rad(view.beta ?? view.W));
-  gl.uniform3f(U.geo, g.h, g.l, g.r);
-  gl.uniform1f(U.mixv, b ? mixv : 0); gl.uniform1f(U.hasB, b ? 1 : 0); gl.uniform1f(U.aspect, asp);
+  const set = (unit, um, uo, f, z) => { gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, f.tex);
+    gl.uniform4f(um, f.im.pano ? 1 : 0, f.im.pano ? rad(W - (f.im.az || 0)) + f.cx : 0, z, f.aspect);
+    gl.uniform2f(uo, f.im.pano ? 0 : f.cx, f.cy); };
+  set(0, U.m0, U.o0, a, za); set(1, U.m1, U.o1, b || a, zb);
+  gl.uniform1f(U.mixv, b ? mixv : 0); gl.uniform1f(U.aspect, w / h);
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-  if (opt.target) { gl.bindFramebuffer(gl.FRAMEBUFFER, null); return; }
   if (vfs.ctx) vfsCompose();
-}
-
-// ---------- self-calibration: how wide is the street and how high was the camera? ----------
-// At each photo change both photos are drawn small, half-way between the two photo spots, for a few
-// street widths and camera heights. The model where the two photos agree best is used for the blend.
-// (At the photo spots themselves the model does not matter, so a change of model never shows as a jump.)
-let probe = null, calibMs = 0;
-function getProbe() {
-  const asp = canvas.width / canvas.height, w = Math.max(48, Math.round(Math.sqrt(9600 * asp))), h = Math.max(32, Math.round(w / asp));
-  if (!probe || probe.w !== w || probe.h !== h) {
-    if (probe) { gl.deleteFramebuffer(probe.fb); gl.deleteTexture(probe.tex); }
-    const tex = gl.createTexture(); gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, tex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-    const fb = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.activeTexture(gl.TEXTURE0);
-    probe = { fb, tex, w, h, px: new Uint8Array(w * h * 4) };
-  }
-  return probe;
-}
-function probeEdges(pr) {   // grey picture with slow brightness changes removed (the two photos may differ in light)
-  const { w, h, px } = pr, g = new Float32Array(w * h), e = new Float32Array(w * h);
-  gl.bindFramebuffer(gl.FRAMEBUFFER, pr.fb); gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px); gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-  for (let i = 0; i < g.length; i++) g[i] = px[i * 4] * .3 + px[i * 4 + 1] * .6 + px[i * 4 + 2] * .1;
-  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) { const i = y * w + x; e[i] = 4 * g[i] - g[i - 1] - g[i + 1] - g[i - w] - g[i + w]; }
-  return e;
-}
-// Left wall, right wall and camera height are tuned one at a time, starting from the previous street
-// (60 m = an open square or park on that side).
-const STREET_W = [4, 7, 11, 17, 28, 60], CAM_H = [1.4, 2, 2.7];
-// Written as a generator: a few candidates per animation frame, so the search never causes a stutter.
-function* calibrator(a, b, view) {
-  const pr = getProbe(), cache = new Map();
-  const score = g => {
-    const k = g.h + ':' + g.l + ':' + g.r; if (cache.has(k)) return cache.get(k);
-    draw(a, null, 0, view, { target: pr, street: g }); const A = probeEdges(pr);
-    draw(b, null, 0, view, { target: pr, street: g }); const B = probeEdges(pr);
-    let err = 0, n = 0;
-    for (let y = Math.floor(pr.h * .15); y < Math.floor(pr.h * .85); y++) for (let x = 2; x < pr.w - 2; x++) { const i = y * pr.w + x; err += Math.abs(A[i] - B[i]); n++; }
-    err /= n; cache.set(k, err); return err;
-  };
-  let best = { ...street }, bestErr = score(best) * 0.97;   // keep the previous street unless another is clearly better
-  yield;
-  for (const key of ['l', 'r', 'h']) for (const v of key === 'h' ? CAM_H : STREET_W) {
-    const g = { ...best, [key]: v }, e = score(g);
-    if (e < bestErr) { best = g; bestErr = e; }
-    yield;
-  }
-  return best;
-}
-// The street model used for drawing glides towards the newest estimate instead of jumping.
-let streetGoal = null;
-function easeStreet(dt) {
-  if (!streetGoal) return;
-  const k = 1 - Math.exp(-dt / 0.2);
-  street = { h: street.h + (streetGoal.h - street.h) * k, l: street.l + (streetGoal.l - street.l) * k, r: street.r + (streetGoal.r - street.r) * k };
 }
 
 // ---------- stabilisation: line the next image up with the current one ----------
@@ -626,46 +522,42 @@ function align(a, b) { // sets b.cx / b.cy so that b lines up with a (as a is cu
 
 // ---------- playback ----------
 let run = 0; // increments on every start/stop so stale loops exit
-const AHEAD = 8;
+const AHEAD = 5;
 function loadFrame(f, quality) {
   if (f.loading) return f.loading;
   return f.loading = new Promise(res => {
-    const img = new Image(); img.crossOrigin = 'anonymous'; img.decoding = 'async';
-    img.onload = async () => {
-      // decode off the main thread where possible, so the animation does not stutter while photos arrive
-      let src = img; try { if (window.createImageBitmap) src = await createImageBitmap(img); } catch (e) { /* use the image */ }
-      if (!f.loading) { if (src.close) src.close(); return res(); }       // freed meanwhile
-      f.tex = makeTexture(src); if (src !== img && src.close) src.close();
-      f.img = img; f.aspect = img.naturalWidth / img.naturalHeight; f.ok = true; res(); };
+    const img = new Image(); img.crossOrigin = 'anonymous';
+    img.onload = () => { f.tex = makeTexture(img); f.img = img; f.aspect = img.naturalWidth / img.naturalHeight; f.ok = true; res(); };
     img.onerror = () => { f.ok = false; res(); };
     img.src = quality === 'hd' ? f.im.hd : f.im.sd;
   });
 }
-function freeFrame(f) { if (f.tex) gl.deleteTexture(f.tex); f.tex = f.img = f.loading = null; f.ok = false; }
+function freeFrame(f) { if (f.tex) gl.deleteTexture(f.tex); f.tex = f.img = f.loading = null; }
 
+// Each image keeps growing at a steady rate while it is on screen, as if we drive into it.
+// The outgoing image is always "Z" times more zoomed than the incoming one, which is the size
+// difference between two photos taken a few metres apart - so the two overlap while they dissolve.
+const FLAT_BASE = 1.3, DEPTH = 22; // DEPTH: assumed distance (m) to the scenery that should line up
 // Horizontal field of view (degrees) of what is on screen, so the extras can pin labels to places.
-const tanHalfOf = (f, zoom = 1) => (f.im.pano ? PANO_T : FLAT_VIEW_T) / zoom;
-// The direction a photo naturally looks: a 360° photo along the road, a flat one where its camera looked.
-const natHeading = f => f.im.pano ? f.brg : (f.im.az || f.brg) + deg(Math.atan(2 * (f.cx || 0) * Math.tan(rad(35))));
-const lerpP = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
-// The camera heading follows the road with a little delay instead of turning in steps at every photo.
-let Wsm = null, lastTick = 0;
-function smoothHeading(target, now) {
-  const dt = Math.min(0.1, Math.max(0, (now - lastTick) / 1000)); lastTick = now;
-  if (Wsm == null) Wsm = target; else Wsm = (Wsm + signed(target, Wsm) * (1 - Math.exp(-dt / 0.5)) + 360) % 360;
-  return Wsm;
+function hfovOf(f, z) {
+  if (f.im.pano) return 2 * deg(Math.atan(Math.tan(rad(46)) / z));
+  const asp = canvas.width / canvas.height, sx = Math.min(1, asp / (f.aspect || 1.5));
+  return 2 * deg(Math.atan(Math.tan(rad(35)) * sx / z));   // ~70° camera, then the cover fit and zoom
 }
-// Postcard stop: hold at one photo's spot, push in slowly and turn towards the place and back.
-function holdAnim(f, hold, my) {
-  const t0 = performance.now(), W0 = Wsm ?? natHeading(f);
-  const look = hold.look != null ? clamp(signed(hold.look, W0), f.im.pano ? 100 : 12) : 0;
+// Compass heading at the centre of the screen: a 360° picture is turned by its stabilisation offset,
+// a flat one looks where its camera looked (shifted a little by the stabilisation).
+const viewHeading = (f, W) => f.im.pano ? W + deg(f.cx || 0) : f.im.az + deg(Math.atan(2 * (f.cx || 0) * Math.tan(rad(35))));
+const lerpP = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+// Postcard stop: hold on one picture, push in slowly and (360° only) turn towards the place and back.
+function holdAnim(f, hold, my, base) {
+  const t0 = performance.now(), look = f.im.pano && hold.look != null ? clamp(signed(hold.look - deg(f.cx || 0), f.brg), 100) : 0;
   return new Promise(done => {
     (function tick(now) {
       if (run !== my) return done();
       const t = Math.min(1, (now - t0) / hold.ms), bell = Math.sin(Math.PI * t), s = bell * bell * (3 - 2 * bell);
-      const zoom = 1 + 0.14 * s, W = W0 + look * s, tanHalf = tanHalfOf(f, zoom); lastTick = now;
-      f._s = 0; draw(f, null, 0, { W, tanHalf, s: 0, beta: f.road ?? f.brg });
-      GV.emit('tick', { pos: f.im.p, W, hfov: 2 * deg(Math.atan(tanHalf)), t });
+      const z = base(f) * (1 + 0.14 * s), W = f.brg + look * s;
+      draw(f, null, 0, z, 1, W);
+      GV.emit('tick', { pos: f.im.p, W: viewHeading(f, W), hfov: hfovOf(f, z), t });
       t < 1 ? requestAnimationFrame(tick) : done();
     })(t0);
   });
@@ -675,7 +567,8 @@ async function play(frames, routeCoords, label) {
   document.body.classList.add('playing');
   const gaps = frames.slice(1).map((f, n) => dist(frames[n].im.p, f.im.p)).sort((x, y) => x - y);
   const medGap = Math.max(1, gaps[gaps.length >> 1] || 4);
-  let i = 0, cur = null, skipped = 0; Wsm = null; street = { h: 2.4, l: 9, r: 9 }; streetGoal = null;
+  const base = f => f.im.pano ? 1 : FLAT_BASE;
+  let i = 0, cur = null, skipped = 0;
   while (run === my) {
     for (let k = 0; k < AHEAD; k++) loadFrame(frames[(i + k) % frames.length], quality);
     const nxt = frames[i % frames.length];
@@ -690,50 +583,27 @@ async function play(frames, routeCoords, label) {
       $('place').textContent = label;
       drawMini(routeCoords, nxt.p);
       GV.emit('frame', { f: nxt, idx: i % frames.length });
-      // How far along the road is the next photo? (sideways GPS wobble is ignored)
-      const beta = nxt.road ?? nxt.brg;
-      let D = medGap;
-      if (cur) {
-        const de = (nxt.im.p[0] - cur.im.p[0]) * 111320 * Math.cos(rad(cur.im.p[1])), dn = (nxt.im.p[1] - cur.im.p[1]) * 111320;
-        D = Math.min(15, Math.max(0.5, de * Math.sin(rad(beta)) + dn * Math.cos(rad(beta))));
-        cur._s = 0; nxt._s = D;
-      } else nxt._s = 0;
-      // constant speed: the step takes as long as its distance needs
-      const dur = parseFloat($('tempo').value) * 1000 * Math.min(2.5, Math.max(0.4, D / medGap));
-      const h0 = cur ? natHeading(cur) : natHeading(nxt), h1 = natHeading(nxt), t0 = performance.now();
-      let cal = null;
-      if (cur) {
-        const Wmid = Wsm ?? h0 + signed(h1, h0) / 2, th = (tanHalfOf(cur) + tanHalfOf(nxt)) / 2;
-        cal = calibrator(cur, nxt, { W: Wmid, tanHalf: th, s: D / 2, beta });
-      }
-      let prevNow = t0;
+      const gap = cur ? Math.min(12, Math.max(1, dist(cur.im.p, nxt.im.p))) : medGap;
+      let Z = Math.min(1.5, DEPTH / (DEPTH - gap));
+      if (cur && !(cur.im.pano && nxt.im.pano)) Z = Math.min(Z, 1.18);
+      const dur = parseFloat($('tempo').value) * 1000 * Math.min(2.2, Math.max(0.5, gap / medGap));
+      const turn = cur ? ((nxt.brg - cur.brg + 540) % 360) - 180 : 0, t0 = performance.now();
       await new Promise(done => {
         (function tick(now) {
           if (run !== my) return done();
-          // a slice of the street calibration (at most ~4 ms per frame), then ease the model towards it
-          if (cal) {
-            const c0 = performance.now(); let r;
-            try { do { r = cal.next(); } while (!r.done && performance.now() - c0 < 4); } catch (e) { console.warn(e); r = { done: true }; }
-            calibMs += performance.now() - c0;
-            if (r.done) { if (r.value) streetGoal = r.value; cal = null; }
-          }
-          easeStreet(Math.min(0.1, (now - prevNow) / 1000)); prevNow = now;
-          // The camera glides at constant speed from one photo spot to the next (t). Each photo is shown on
-          // its own while the camera is near the spot it was taken from, where the 3D model is almost exact;
-          // the photos only blend in the middle stretch (e), so there is little ghosting and no smearing.
-          const t = Math.min(1, (now - t0) / dur), u = Math.min(1, Math.max(0, (t - .22) / .56)), e = u * u * (3 - 2 * u);
-          const W = smoothHeading(h0 + signed(h1, h0) * t, now);
-          const tanHalf = cur ? tanHalfOf(cur) * (1 - t) + tanHalfOf(nxt) * t : tanHalfOf(nxt);
-          if (cur) draw(cur, nxt, e, { W, tanHalf, s: t * D, beta });
-          else draw(nxt, null, 0, { W, tanHalf, s: 0, beta });
-          GV.emit('tick', { pos: cur ? lerpP(cur.im.p, nxt.im.p, t) : nxt.im.p, W, hfov: 2 * deg(Math.atan(tanHalf)), t });
+          const t = Math.min(1, (now - t0) / dur), u = Math.min(1, Math.max(0, (t - .15) / .7)), e = u * u * (3 - 2 * u);
+          const W = cur ? cur.brg + turn * t : nxt.brg;
+          if (cur) draw(cur, nxt, e, base(cur) * Math.pow(Z, t), base(nxt) * Math.pow(Z, t - 1), W);
+          else draw(nxt, null, 0, base(nxt), 1, W);
+          const dom = cur && e < .5 ? cur : nxt, zd = dom === cur ? base(cur) * Math.pow(Z, t) : base(nxt) * (cur ? Math.pow(Z, t - 1) : 1);
+          GV.emit('tick', { pos: cur ? lerpP(cur.im.p, nxt.im.p, e) : nxt.im.p, W: viewHeading(dom, W), hfov: hfovOf(dom, zd), t });
           t < 1 ? requestAnimationFrame(tick) : done();
         })(t0);
       });
       if (cur) freeFrame(cur);
-      cur = nxt; cur._s = 0;
+      cur = nxt;
       const hold = GV.hold(cur, i % frames.length);
-      if (hold) { await holdAnim(cur, hold, my); GV.emit('holdend'); }
+      if (hold) { await holdAnim(cur, hold, my, base); GV.emit('holdend'); }
     }
     i++;
   }

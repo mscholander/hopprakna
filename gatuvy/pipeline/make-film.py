@@ -139,7 +139,9 @@ def main():
             else: save(run_hosted('maxim', {'image': upload(src), 'model': a.enhance}), dst)
         use = dst if a.enhance else src
         return data_uri(use)   # FILM kräver en bild med filändelse, så den bäddas in i anropet i stället för att laddas upp
-    with cf.ThreadPoolExecutor(a.jobs) as ex: urls = list(ex.map(prep, keys))
+    # en bild kan ha en egen ut-vy (efter en sväng som vrids i bilden): klippet till nästa bild startar från den
+    keys_out = [f.get('file_out', f['file']) for f in meta['frames']]
+    with cf.ThreadPoolExecutor(a.jobs) as ex: urls = list(ex.map(prep, keys)); urls_out = [u if ko == k else prep(ko) for u, k, ko in zip(urls, keys, keys_out)]
     print(f'{len(keys)} nyckelbilder klara ({tag}), {time.time() - t0:.0f} s')
 
     # 2. ett klipp per bildpar
@@ -150,7 +152,8 @@ def main():
     gaps = [f.get('gap', 0) for f in meta['frames']][1:]
     # hur länge varje klipp ska synas i filmen: jämn fart om --speed är satt, annars --clip-seconds
     play = [max(0.4, g / a.speed) if a.speed and g else a.clip_seconds for g in gaps]
-    cuts = [i for i, g in enumerate(gaps) if gen and g > a.max_gap]
+    # ingen generering över långa luckor eller byten av fotokörning (link = dissolve): där blir det en övertoning
+    cuts = [i for i, g in enumerate(gaps) if gen and (g > a.max_gap or meta['frames'][i + 1].get('link') == 'dissolve')]
     for i in cuts: play[i] = 1.0
     failed = []
     def clip(i):
@@ -163,14 +166,14 @@ def main():
                 if a.speed: ai.seconds = min(5, max(1, math.ceil(play[i])))   # generera minst så långt klipp som ska visas
                 for attempt in range(3):
                     try:
-                        out = run_hosted(a.engine, ENGINES[a.engine](ai, prompt, urls[i], urls[i + 1]))
+                        out = run_hosted(a.engine, ENGINES[a.engine](ai, prompt, urls_out[i], urls[i + 1]))
                         save(out if isinstance(out, str) else out[0], dst); break
                     except Exception as e:
                         if attempt == 2: failed.append(i); print(f'klipp {i} misslyckades: {str(e)[:120]}', flush=True); return None
                         time.sleep(5)
                 if (i + 1) % 25 == 0: print(f'  {i + 1} klipp påbörjade, {time.time() - t0:.0f} s', flush=True)
             else:
-                inp = {'frame1': urls[i], 'frame2': urls[i + 1], 'times_to_interpolate': a.times}
+                inp = {'frame1': urls_out[i], 'frame2': urls[i + 1], 'times_to_interpolate': a.times}
                 save(run_local(a.film_local, inp) if a.film_local else run_hosted('film', inp), dst)
         return dst
     with cf.ThreadPoolExecutor(a.jobs) as ex: clips = list(ex.map(clip, range(len(keys) - 1)))
@@ -188,7 +191,7 @@ def main():
         enc = ['-r', str(a.fps), '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '18', '-preset', 'veryfast', '-an', '-f', 'mpegts', dst]
         base = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y']
         if c is None:   # klippet gick inte att generera: vanlig övertoning mellan de två fotona i stället
-            t = secs or 2.7; k0, k1 = (os.path.join(d if a.enhance else a.work, keys[j]) for j in (i, i + 1))
+            t = secs or 2.7; kd = d if a.enhance else a.work; k0, k1 = os.path.join(kd, keys_out[i]), os.path.join(kd, keys[i + 1])
             subprocess.run(base + ['-loop', '1', '-t', f'{t}', '-i', k0, '-loop', '1', '-t', f'{t}', '-i', k1, '-filter_complex',
                                    f'[0]scale={W}:{H},fps={a.fps}[x];[1]scale={W}:{H},fps={a.fps}[y];[x][y]xfade=transition=fade:duration={t}:offset=0'] + enc, check=True)
             return dst
@@ -196,7 +199,16 @@ def main():
         vf = f'{pts},fps={a.fps},scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H}' + (',trim=start_frame=1,setpts=PTS-STARTPTS' if i else '')
         subprocess.run(base + ['-i', c, '-vf', vf] + enc, check=True)
         return dst
-    with cf.ThreadPoolExecutor(4) as ex: parts = list(ex.map(part, range(len(clips))))
+    with cf.ThreadPoolExecutor(4) as ex: clip_parts = list(ex.map(part, range(len(clips))))
+    # färdiga svängklipp (kameran vrids inuti 360°-bilden) läggs in efter klippet som leder fram till bilden
+    parts = []
+    for i, cp in enumerate(clip_parts):
+        parts.append(cp); pre = meta['frames'][i + 1].get('pre')
+        if pre:
+            dst = os.path.join(d, f'turn_{i + 1:04d}_{label}.ts')
+            subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-i', os.path.join(a.work, pre), '-vf', f'fps={a.fps},scale={W}:{H}',
+                            '-r', str(a.fps), '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '18', '-preset', 'veryfast', '-an', '-f', 'mpegts', dst], check=True)
+            parts.append(dst)
     lst = os.path.join(d, f'parts_{label}.txt'); open(lst, 'w').write(''.join(f"file '{os.path.abspath(p)}'\n" for p in parts))
     subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-f', 'concat', '-safe', '0', '-i', lst, '-c', 'copy', '-movflags', '+faststart', out], check=True)
     # fotograferna ska anges (bilderna är öppet licensierade)

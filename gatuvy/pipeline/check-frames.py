@@ -85,15 +85,28 @@ def match(ka, kb):
 def check(work, limits=LIMITS, quiet=False):
     meta = json.load(open(os.path.join(work, 'frames.json'))); fr = meta['frames']
     res = []
+    # En bild kan ha två vyer: 'file' (blicken när man kommer fram) och 'file_out' (blicken när man kör vidare,
+    # efter en sväng som vrids i bilden). Varje steg jämför förra bildens ut-vy med den här bildens in-vy.
+    out_of = lambda f: f.get('file_out', f['file'])
     grey = [load_grey(os.path.join(work, f['file'])) for f in fr]
+    grey_out = [load_grey(os.path.join(work, out_of(f))) if 'file_out' in f else grey[i] for i, f in enumerate(fr)]
     kps = [keypoints(os.path.join(work, f['file'])) for f in fr] if cv2 is not None else None
+    kps_out = [keypoints(os.path.join(work, out_of(f))) if 'file_out' in f else kps[i] for i, f in enumerate(fr)] if cv2 is not None else None
     for i, f in enumerate(fr):
         r = {'i': i, 'file': f['file'], 'fail': [], 'warn': []}
         side = f.get('side'); car = f.get('carHeading'); view = f.get('bearing')
         if side is not None and side > limits['side']: r['fail'].append(f'{side:.0f} m från vägen')
-        if car is not None and view is not None and ang(car, view) > limits['heading']:
+        dissolve = f.get('link') == 'dissolve'; r['dissolve'] = dissolve
+        if f.get('reverse'): r['warn'].append('bil i motsatt riktning (inga andra bilder här)')
+        elif car is not None and view is not None and 'turn' not in f and ang(car, view) > limits['heading']:
             r['fail'].append(f'tagen av en bil som körde åt andra hållet ({ang(car, view):.0f}°)')
-        if i:
+        if i and dissolve:
+            # Byte av fotokörning: övertoning på (nästan) samma plats. Bilderna ska inte likna varandra i detalj.
+            p = fr[i - 1]; step = f.get('jump', abs(f.get('along', 0) - p.get('along', 0)))
+            if step > 8: r['warn'].append(f'körningsbyte med hopp på {step:.0f} m')
+            else: r['warn'].append('körningsbyte (övertoning)')
+            r['fwd'], r['bwd'], r['explained'] = 1.0, 0.0, True
+        elif i:
             p = fr[i - 1]
             if 'along' in f and 'along' in p:
                 step = f['along'] - p['along']
@@ -102,14 +115,15 @@ def check(work, limits=LIMITS, quiet=False):
                 elif step > limits['step_fail']: r['fail'].append(f'{step:.0f} m från förra (lucka)')
                 elif step > limits['step_warn']: r['warn'].append(f'{step:.0f} m från förra')
             elif not quiet: r['warn'].append('saknar position längs vägen')
-            if view is not None and p.get('bearing') is not None and ang(view, p['bearing']) > limits['turn']:
-                r['warn'].append(f'skarp sväng ({ang(view, p["bearing"]):.0f}°)')
-            fwd, bwd = best_match(grey[i - 1], grey[i]), best_match(grey[i], grey[i - 1])
+            pb = p.get('bearing_out', p.get('bearing'))
+            if view is not None and pb is not None and ang(view, pb) > limits['turn']:
+                r['warn'].append(f'skarp sväng ({ang(view, pb):.0f}°)')
+            fwd, bwd = best_match(grey_out[i - 1], grey[i]), best_match(grey[i], grey_out[i - 1])
             r['fwd'], r['bwd'] = round(fwd, 3), round(bwd, 3)
             if fwd < limits['sim_fail']: r['fail'].append(f'liknar inte förra bilden (likhet {fwd:.2f}): tittar åt fel håll eller fel plats?')
             elif fwd < limits['sim_warn']: r['warn'].append(f'svag likhet med förra ({fwd:.2f})')
             if kps is not None:
-                n, ex = match(kps[i - 1], kps[i]); r['kp'], r['exp'] = n, round(ex, 3)
+                n, ex = match(kps_out[i - 1], kps[i]); r['kp'], r['exp'] = n, round(ex, 3)
                 # Få gemensamma detaljer är väntat där fotokörningen byts (annat ljus, andra bilar) eller där
                 # steget är långt: då är det en svag övergång, inte en felaktig bild.
                 step = f['along'] - p['along'] if 'along' in f and 'along' in p else 0
@@ -119,7 +133,7 @@ def check(work, limits=LIMITS, quiet=False):
         res.append(r)
     # En bild som liknar både förra och nästa bild dåligt hör inte hemma i följden (fel plats eller fel håll).
     for i in range(1, len(res) - 1):
-        weak = lambda r: r.get('fwd', 1) < limits['sim_warn'] or (r.get('kp', 999) < limits['kp_warn'] and not r.get('explained'))
+        weak = lambda r: not r.get('dissolve') and (r.get('fwd', 1) < limits['sim_warn'] or (r.get('kp', 999) < limits['kp_warn'] and not r.get('explained')))
         if weak(res[i]) and weak(res[i + 1]):
             msg = f"liknar varken förra eller nästa bild (detaljer {res[i].get('kp', '–')}/{res[i + 1].get('kp', '–')}, form {res[i]['fwd']:.2f}/{res[i + 1]['fwd']:.2f})"
             if not any(m.startswith('liknar') for m in res[i]['fail']): res[i]['fail'].append(msg)

@@ -53,5 +53,10 @@ Erfarenheter från testet (Rue de Rivoli, Paris, 19 nyckelbilder):
   Static API:et läser inte nyckeln från en rubrik. Bara Googles egna bilar tas med (privatpersoners panoramor
   har andra datum och ibland fel position), och luckor fylls genom att följa panoramornas länkar
   (`--densify`). Louvren–Triumfbågen: 369 nyckelbilder, ca 4 800 bitar och 600 metadataanrop hos Google.
+- Svängar och körningsbyten är det som får AI-klippen att rusa. `google-drive.py` låter AI bara göra raka
+  sträckor: svängar vrids inuti 360°-bilden och byten mellan fotokörningar tonas över. Malmö, Hökgatan 3 mot
+  Bispgatan (603 m, 5 svängar, 9 övertoningar): inget AI-klipp gick mer än dubbelt så fort som medianen.
+  Ett AI-klipp snett över ett hörn (mellan två bilder) gav påhittade gator; därför vrids hela svängen i den
+  första bilden och hoppet över hörnet tonas över.
 - FILM fungerar bäst när fotona ligger högst ca 2,5 m isär; föremål nära kameran (pelare, bilar,
   byggnadsställningar) förvrängs ändå i mellanbilderna.

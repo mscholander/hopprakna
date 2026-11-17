@@ -135,6 +135,14 @@ def main():
         if ang(c['a'], c['d']) < a.turn:
             if c['link'] == 'dissolve' and i: c['d'] = c['a']                         # liten skillnad: AI-klippet tar den
             else: c['a'] = c['d']
+    # Hörn som ligger MELLAN två bilder (två svängar i rad åt samma håll): ett AI-klipp snett över hörnet blir
+    # fel (modellen hittar på en annan gata). Vrid i stället hela svängen i den första bilden och tona över
+    # till nästa bild, som redan tittar längs den nya gatan.
+    for i in range(n - 1):
+        t0, t1 = signed(K[i]['d'], K[i]['a']), signed(K[i + 1]['d'], K[i + 1]['a'])
+        if abs(t0) >= a.turn and abs(t1) >= a.turn and t0 * t1 > 0 and K[i + 1]['link'] == 'ai':
+            K[i]['d'] = K[i + 1]['d']; K[i + 1]['a'] = K[i + 1]['d']
+            K[i + 1]['link'] = 'dissolve'; K[i + 1]['jump'] = round(dist(pos[i], pos[i + 1]), 1)
     # 6. rendera bilder och svängar
     frames = []
     for i, c in enumerate(K):

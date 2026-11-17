@@ -75,6 +75,8 @@ const server = http.createServer((q, r) => {
       const data = document.getElementById('view').toDataURL('image/jpeg', 0.95);
       if (prev && prev.ok && i > 1) { const pp = fr[i - 2]; if (pp.tex) { gl.deleteTexture(pp.tex); pp.tex = null; pp.img = null; } }
       return { data, lon: f.im.p[0], lat: f.im.p[1], bearing: f.brg, pano: f.im.pano, credit: f.im.credit, taken: f.im.t, src: f.im.hd, seq: f.im.seq,
+        // för bildkontrollen: läge längs och åt sidan av vägen, och åt vilket håll fotografen rörde sig
+        along: Math.round(f.d * 10) / 10, side: Math.round(dist(f.p, f.im.p) * 10) / 10, carHeading: f.im.move ?? null,
         gap: prev ? dist(prev.im.p, f.im.p) : 0 };
     }, i);
     if (!r) { console.log(`  bild ${i}: kunde inte laddas, hoppar över`); continue; }

@@ -16,6 +16,14 @@ Gör en riktig videofil av en rutt, i stället för att sidan tonar mellan foton
      `python3 make-film.py work/paris --engine wan-video/wan-2.2-i2v-fast --resolution 720p`
      Använder masterprompten i `master-prompt.txt` för alla klipp. Exportera då nyckelbilder ca 25 m isär
      (`export-frames.js --spacing 2 --step 9`): varje klipp blir 81 bildrutor, 2,7 s i 30 bilder/s.
+   **Bildkontroll** körs automatiskt av `make-film.py` före generering (eller fristående:
+   `python3 check-frames.py work/x`, och `--fix work/x_ok` för att ta bort underkända bilder). Den underkänner
+   bilder som ligger bakom förra bilden, långt från vägen, är tagna av en bil som körde åt andra hållet, inte liknar
+   grannbilderna (fel plats eller fel håll), eller där ett avsnitt rör sig bakåt. Svaga övergångar (ny fotokörning,
+   långt steg) ger varning. Resultatet blir en tabell och `kontroll.png` (rött = underkänd, gult = varning).
+   Testad på Malmö-urvalet (godkänt) och på medvetet förstörda varianter: baklänges, tre inklistrade bilder
+   från en annan stad, två bilder i fel ordning och en bil i fel körriktning underkändes alla.
+   Detaljpunktsmatchningen kräver OpenCV (`pip install opencv-python-headless`).
 3. **Bildförbättring med MAXIM** (valfritt, före steg 2): `make-film.py … --enhance "Image Deblurring (GoPro)"`.
 
 `--times 4` ger 16 steg per bildpar, alltså drygt en halv sekund film per par vid 30 bilder per sekund.

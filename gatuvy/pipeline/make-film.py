@@ -109,6 +109,7 @@ def main():
     ap.add_argument('--seed', type=int, default=1); ap.add_argument('--seconds', type=float, default=5, help='kliplängd för modeller som anger tid')
     ap.add_argument('--draft', action='store_true', help='utkastläge (billigare, lägre kvalitet) för modeller som har det')
     ap.add_argument('--speed', type=float, default=0, help='jämn fart i m/s: varje klipp spelas på (avstånd mellan fotona)/fart sekunder, t.ex. 4.1 = 15 km/h')
+    ap.add_argument('--skip-check', action='store_true', help='hoppa över bildkontrollen (rekommenderas inte)')
     ap.add_argument('--max-gap', type=float, default=30, help='större lucka än så här (meter) mellan två foton genereras inte, utan blir en kort övertoning')
     ap.add_argument('--clip-seconds', type=float, default=0, help='spela varje klipp på så här många sekunder i den färdiga filmen (0 = alla bildrutor i --fps)')
     ap.add_argument('--fps', type=int, default=30); ap.add_argument('--jobs', type=int, default=3)
@@ -117,6 +118,14 @@ def main():
     if not shutil.which('ffmpeg'): sys.exit('ffmpeg saknas')
     hosted = not (a.film_local and (a.maxim_local or not a.enhance))
     if hosted and not os.environ.get('REPLICATE_API_TOKEN'): sys.exit('Sätt REPLICATE_API_TOKEN (eller använd --film-local/--maxim-local)')
+    # 0. bildkontroll: rätt ordning, rätt håll, följer sträckan. Ingen generering om något underkänns.
+    if not a.skip_check:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('cf', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'check-frames.py'))
+        cfm = importlib.util.module_from_spec(spec); spec.loader.exec_module(cfm)
+        m0, res = cfm.check(a.work); nfail = cfm.report(a.work, m0, res)
+        if nfail: sys.exit(f'Avbryter: {nfail} bilder underkändes i bildkontrollen (se {os.path.join(a.work, "kontroll.png")}).\n'
+                          f'Rätta urvalet, eller kör: python3 check-frames.py {a.work} --fix <ny mapp>')
     meta = json.load(open(os.path.join(a.work, 'frames.json'))); keys = [f['file'] for f in meta['frames']]
     tag = ('maxim-' + ''.join(c for c in a.enhance.lower() if c.isalnum())) if a.enhance else 'raw'
     d = os.path.join(a.work, tag); os.makedirs(d, exist_ok=True)

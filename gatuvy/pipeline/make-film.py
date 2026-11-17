@@ -112,7 +112,7 @@ def main():
     ap.add_argument('--skip-check', action='store_true', help='hoppa över bildkontrollen (rekommenderas inte)')
     ap.add_argument('--max-gap', type=float, default=30, help='större lucka än så här (meter) mellan två foton genereras inte, utan blir en kort övertoning')
     ap.add_argument('--clip-seconds', type=float, default=0, help='spela varje klipp på så här många sekunder i den färdiga filmen (0 = alla bildrutor i --fps)')
-    ap.add_argument('--fps', type=int, default=30); ap.add_argument('--jobs', type=int, default=3)
+    ap.add_argument('--fps', type=int, default=30); ap.add_argument('--jobs', type=int, default=8)
     ap.add_argument('--film-local', default=''); ap.add_argument('--maxim-local', default='')
     a = ap.parse_args()
     if not shutil.which('ffmpeg'): sys.exit('ffmpeg saknas')

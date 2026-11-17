@@ -82,6 +82,20 @@ def match(ka, kb):
     return int(inl.sum()), (float(np.median(np.log(rb[keep] / ra[keep]))) if keep.sum() >= 5 else 0.0)
 
 
+def proven_forward(fr, i):
+    """Steget från bild i-1 till i går bevisligen framåt: samma Google-körning (bilarna fotograferar i den ordning
+    de kör), bilen körde åt vårt håll, blicken pekar i bilens färdriktning och bilden ligger längre fram längs rutten.
+    Då väger det tyngre än bildens riktningsmått, som luras av upprepade mönster (räcken, broar, alléer)."""
+    if i == 0 or i >= len(fr): return False
+    a, b = fr[i - 1], fr[i]
+    if b.get('link') != 'ai' or a.get('reverse') or b.get('reverse'): return False
+    if not a.get('seq') or a.get('seq') != b.get('seq'): return False
+    if 'along' not in a or 'along' not in b or b['along'] <= a['along']: return False
+    car, view = b.get('carHeading'), b.get('bearing')
+    if car is None or view is None: return False
+    return abs((car - view + 180) % 360 - 180) < 30
+
+
 def check(work, limits=LIMITS, quiet=False):
     meta = json.load(open(os.path.join(work, 'frames.json'))); fr = meta['frames']
     res = []
@@ -147,6 +161,10 @@ def check(work, limits=LIMITS, quiet=False):
         win = d[i:i + W]
         if len(win) == W and sum(win) / W < thr:
             for r in res[i:i + W]:
+                if proven_forward(fr, r['i']):
+                    msg = 'riktningen syns inte säkert i bilden (upprepade mönster, t.ex. räcken), men bilden kommer från samma körning i rätt ordning'
+                    if msg not in r['warn']: r['warn'].append(msg)
+                    continue
                 msg = 'avsnittet ser ut att gå bakåt'
                 if msg not in r['fail']: r['fail'].append(msg)
     return meta, res

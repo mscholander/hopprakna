@@ -13,7 +13,7 @@ Använd bara för privata tester.
 Steg: rutt (OSRM) -> punkter var --gap meter -> närmaste panorama per punkt (panoIds) -> panoramats riktning
 (metadata) -> bitarna (tiles) sätts ihop till en 360°-bild -> vyn rakt fram i färdriktningen sparas som JPG.
 """
-import argparse, io, json, math, os, sys, time, urllib.parse, urllib.request, urllib.error
+import re, argparse, io, json, math, os, sys, time, urllib.parse, urllib.request, urllib.error
 import concurrent.futures as cf
 import numpy as np
 from PIL import Image
@@ -41,6 +41,8 @@ def http(url, body=None, timeout=60):
 
 
 def geocode(q):
+    m = re.fullmatch(r'\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*', q)
+    if m: return float(m.group(2)), float(m.group(1))          # "lat, lon" direkt, utan adressökning
     u = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + urllib.parse.quote(q)
     j = json.loads(http(u)); time.sleep(1.1)
     if not j: raise RuntimeError(f'Hittade inte "{q}"')

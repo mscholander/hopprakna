@@ -6,18 +6,19 @@ Används av make-film.py. Problemen den löser (uppmätta i Malmö-filmen, nov 2
     Nu tonas i stället slutet av klippet före över i början av klippet efter, medan båda rör sig.
   - Svängarna (renderade direkt ur 360°-bilden) var dubbelt så skarpa som AI-klippen och hade annan färgton,
     så bilden "poppade" vid varje sväng. Nu får svängen samma skärpa och färg som AI-klippen intill.
-  - Svängarna startade och stannade mjukt (= bilen stod still i hörnet). Nu vrids kameran med jämnare fart,
-    och svängen överlappar AI-klippen före och efter så att framåtrörelsen glider över i vridningen.
+  - Svängarna gick från rakt fram till full vridfart på 0,2 s (ett ryck in i och ur varje sväng). Nu ökar och
+    minskar vridfarten under en tredjedel av svängen var, toppfarten är begränsad och korta svängar förlängs.
+    Mellanbilderna räknas fram exakt (en ren kameravridning är en homografi), så inga dubbelkonturer.
+  - AI-klippen (1280×704) sträcktes förut till nyckelbildernas 1280×720, vilket gav ett zoomhopp vid varje sväng.
+    Nu byggs filmen i AI-klippens format, och varje skarv riktas in automatiskt (seam_shift/align_seam).
   - Små hopp mellan två AI-klipp döljs med en kort överlappning.
 """
 import json, os, subprocess
 import numpy as np
 import cv2
 
-# Uppmätt: full skärpematchning gjorde svängarna mjukare än AI-klippen (0,6×), eftersom AI-rutorna intill
-# själva blandas mellan två källrutor. 0,6 av oskärpan ger samma upplevda skärpa.
-BLUR_SCALE = 0.6
-OVERLAP = {'ai→ai': 4, 'ai→sväng': 9, 'sväng→ai': 9, 'övertoning': 24}
+BLUR_SCALE = 1.0      # andel av den uppmätta skärpeskillnaden som jämnas ut
+OVERLAP = {'ai→ai': 4, 'ai→sväng': 12, 'sväng→ai': 12, 'övertoning': 24}
 
 
 def fit(img, W, H):
@@ -55,23 +56,49 @@ def mix(a, b, t):
 def smoothstep(x): return x * x * (3 - 2 * x)
 
 
-def turn_profile(frames, ramp=0.2):
-    """Svängklippen är renderade med mjuk start och mjukt stopp (smoothstep). Räkna om till jämnare
-    vridfart: fart som ökar under de första 20 % och minskar under de sista 20 %, konstant däremellan."""
-    n = len(frames); out = []
-    vmax = 1 / (1 - ramp)
-    for j in range(n):
-        t = j / (n - 1)
-        if t < ramp: p = vmax * t * t / (2 * ramp)
-        elif t > 1 - ramp: p = 1 - vmax * (1 - t) ** 2 / (2 * ramp)
-        else: p = vmax * (t - ramp / 2)
-        lo, hi = 0.0, 1.0                                   # hitta källrutan där smoothstep(x) = p
-        for _ in range(30):
-            mid = (lo + hi) / 2
-            if smoothstep(mid) < p: lo = mid
-            else: hi = mid
-        x = (lo + hi) / 2 * (n - 1); k = int(x); u = x - k
-        out.append(frames[k] if k + 1 >= n else mix(frames[k], frames[k + 1], u))
+TURN_PEAK = 40.0      # högsta vridfart i en sväng (grader/s)
+TURN_RAMP = 0.35     # andel av svängen som går åt till att öka respektive minska vridfarten
+TURN_MIN = 2.0       # kortaste sväng (s); kortare svängar startade och stannade ryckigt
+
+
+def yaw_homography(W, H, d, fov=92.0, horizon=0.08):
+    """Bildavbildning (utbild → källbild) för en kamera som vridits d grader runt lodaxeln, i samma geometri
+    som google-frames.view(). En ren vridning ger exakt en homografi, så mellanbilder blir skarpa."""
+    f = np.tan(np.radians(fov / 2))
+    # pixel = A @ (X, Y, 1) där X, Y är riktningens koordinater i bildplanet (z = 1)
+    A = np.array([[W / (2 * f), 0, W / 2 - 0.5], [0, -H * (W / H) / (2 * f), (1 - horizon) * H / 2 - 0.5], [0, 0, 1]])
+    c, s_ = np.cos(np.radians(d)), np.sin(np.radians(d))
+    R = np.array([[c, 0, s_], [0, 1, 0], [-s_, 0, c]])
+    return A @ R @ np.linalg.inv(A)
+
+
+def turn_frames(src, delta, fps, W, H, fov=92.0, horizon=0.08):
+    """Svängen räknas om till mjuk start, jämn fart och mjukt stopp med högst TURN_PEAK grader/s.
+    Källrutorna är renderade med vinkel delta·smoothstep(k/n); varje ny ruta skapas genom att de två
+    närmaste källrutorna vrids exakt till rätt vinkel och blandas (där den ena saknar bild tar den andra över)."""
+    n = len(src) - 1; sh, sw = src[0].shape[:2]
+    ang_src = [delta * smoothstep(k / n) for k in range(n + 1)]
+    T = max(TURN_MIN, abs(delta) / (TURN_PEAK * (1 - TURN_RAMP))); m = max(2, round(T * fps))
+    vmax = 1 / (1 - TURN_RAMP); out = []
+    for j in range(m + 1):
+        t = j / m
+        if t < TURN_RAMP: p = vmax * t * t / (2 * TURN_RAMP)
+        elif t > 1 - TURN_RAMP: p = 1 - vmax * (1 - t) ** 2 / (2 * TURN_RAMP)
+        else: p = vmax * (t - TURN_RAMP / 2)
+        th = delta * p
+        k = max(0, min(n - 1, int(np.searchsorted(ang_src, th) - 1) if delta > 0 else int(np.searchsorted([-x for x in ang_src], -th) - 1)))
+        acc = np.zeros((sh, sw, 3), np.float32); wsum = np.zeros((sh, sw, 1), np.float32)
+        span = ang_src[k + 1] - ang_src[k]; u = 0.5 if abs(span) < 1e-6 else min(1, max(0, (th - ang_src[k]) / span))
+        for kk, w in ((k, 1 - u), (k + 1, u)):
+            if w < 1e-3: continue
+            Hm = yaw_homography(sw, sh, th - ang_src[kk], fov, horizon)
+            img = cv2.warpPerspective(src[kk], Hm, (sw, sh), flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP, borderValue=0)
+            msk = cv2.warpPerspective(np.ones((sh, sw), np.float32), Hm, (sw, sh), flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP, borderValue=0)[..., None]
+            acc += img.astype(np.float32) * w * msk; wsum += w * msk
+        fr = (acc / np.maximum(wsum, 1e-4)).astype(np.uint8)
+        if (wsum < 1e-3).any():                                  # kant utan bild (bara vid mycket glesa källrutor)
+            fr = np.where(wsum < 1e-3, src[k + (u >= 0.5)], fr)
+        out.append(fit(fr, W, H))
     return out
 
 
@@ -112,10 +139,61 @@ def match_look(frames, ref_a, ref_b):
     return out
 
 
+_orb = None
+def seam_shift(a, b):
+    """Likformig avbildning (skala, vridning, förskjutning runt bildens mitt) som för b till a, eller None om
+    bilderna inte går att rikta in säkert (t.ex. två olika körningar)."""
+    global _orb
+    _orb = _orb or cv2.ORB_create(2500)
+    sm = lambda x: cv2.resize(cv2.cvtColor(x, cv2.COLOR_BGR2GRAY), None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
+    ka, da = _orb.detectAndCompute(sm(a), None); kb, db = _orb.detectAndCompute(sm(b), None)
+    if da is None or db is None or len(ka) < 50 or len(kb) < 50: return None
+    m = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True).match(db, da)
+    if len(m) < 50: return None
+    pb = np.float32([kb[x.queryIdx].pt for x in m]) * 2; pa = np.float32([ka[x.trainIdx].pt for x in m]) * 2
+    M, inl = cv2.estimateAffinePartial2D(pb, pa, method=cv2.RANSAC, ransacReprojThreshold=3)
+    if M is None or inl.sum() < 60: return None
+    h, w = a.shape[:2]; c = np.array([w / 2, h / 2])
+    sc = float(np.hypot(M[0, 0], M[1, 0])); rot = float(np.degrees(np.arctan2(M[1, 0], M[0, 0])))
+    t = M[:, :2] @ c + M[:, 2] - c                                 # förskjutning av bildens mitt
+    if abs(sc - 1) > 0.08 or abs(rot) > 3 or abs(t[0]) > 0.08 * w or abs(t[1]) > 0.08 * h: return None
+    if abs(sc - 1) < 0.002 and abs(rot) < 0.05 and np.hypot(*t) < 0.7: return None
+    return sc, rot, t
+
+
+def warp_part(img, sc, rot, t, f):
+    """Bråkdelen f av avbildningen (f = 0 → oförändrad)."""
+    if abs(f) < 1e-3: return img
+    h, w = img.shape[:2]
+    M = cv2.getRotationMatrix2D((w / 2, h / 2), -rot * f, sc ** f); M[:, 2] += np.asarray(t) * f
+    return cv2.warpAffine(img, M, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
+
+
+def align_seam(tail, head, n=15):
+    """Riktar in skarven: halva rättningen läggs på slutet av delen före, halva på början av delen efter,
+    och tonas bort över n bildrutor åt vardera hållet. Då försvinner små hopp (zoom, några pixlar) utan att synas."""
+    r = seam_shift(tail[-1], head[0])
+    if r is None: return tail, head, None
+    sc, rot, t = r; na, nb = min(n, len(tail) - 1), min(n, len(head) - 1)
+    tail = tail[:len(tail) - na] + [warp_part(tail[len(tail) - na + j], sc, rot, t, -0.5 * smoothstep((j + 1) / na)) for j in range(na)] if na > 0 else tail
+    head = [warp_part(head[j], sc, rot, t, 0.5 * (1 - smoothstep(j / nb))) for j in range(nb)] + head[nb:] if nb > 0 else head
+    return tail, head, r
+
+
+def clip_size(clips):
+    for c in clips:
+        if c:
+            cap = cv2.VideoCapture(c); w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            if w and h: return [w, h]
+    return None
+
+
 def assemble(meta, work, clips, play, cuts, keys_in, keys_out, out, fps=30, size=None, bounds_json=None):
     """clips[i] = AI-klipp från bild i till i+1 (eller None), play[i] = sekunder det ska ta,
     cuts = index där bild i → i+1 ska bli en övertoning, keys_in/keys_out = sökvägar till bildernas in-/ut-vy."""
-    W, H = size or meta.get('size', [1280, 720]); H -= H % 2
+    # Filmen byggs i AI-klippens eget format (t.ex. 1280×704). Nyckelbilder och svängar (1280×720) beskärs då
+    # i stället för att AI-klippen sträcks ut, vilket annars gav 2–3 % zoomhopp vid varje sväng.
+    W, H = size or clip_size(clips) or meta.get('size', [1280, 720]); H -= H % 2; W -= W % 2
     fr = meta['frames']
     # 1. plan: delar i ordning. Bildrutorna läses först när delen behövs, så att bara ett par klipp ligger i minnet.
     plan = []
@@ -126,7 +204,16 @@ def assemble(meta, work, clips, play, cuts, keys_in, keys_out, out, fps=30, size
             if drop_first and len(src) > 1: src = src[1:]                       # första rutan = förra klippets sista
             return retime(src, max(4, round(play[i] * fps)))
         return load
-    def turn(path): return lambda: turn_profile(read_clip(path, W, H))
+    def turn(path, f):
+        def load():
+            cap = cv2.VideoCapture(path); src = []
+            while True:
+                ok, im = cap.read()
+                if not ok: break
+                src.append(im)
+            if 'turn' not in f: return [fit(x, W, H) for x in src]
+            return turn_frames(src, f['turn'], fps, W, H, meta.get('fov', 92.0), meta.get('horizon', 0.08))
+        return load
     for i in range(len(fr) - 1):
         if i in cuts or clips[i] is None:
             if not plan or plan[-1][0] == 'tona': plan.append(('still', still(keys_out[i], 15)))
@@ -134,7 +221,7 @@ def assemble(meta, work, clips, play, cuts, keys_in, keys_out, out, fps=30, size
         else:
             plan.append(('ai', ai(i, bool(plan) and plan[-1][0] != 'tona')))
         if fr[i + 1].get('pre'):
-            plan.append(('sväng', turn(os.path.join(work, fr[i + 1]['pre']))))
+            plan.append(('sväng', turn(os.path.join(work, fr[i + 1]['pre']), fr[i + 1])))
     if plan and plan[-1][0] == 'tona': plan.append(('still', still(keys_in[-1], 15)))
     parts = [(k, f) for k, f in plan if k != 'tona']
     tona_before = set(); n = 0
@@ -156,13 +243,16 @@ def assemble(meta, work, clips, play, cuts, keys_in, keys_out, out, fps=30, size
     # 3. skriv ut med överlappning mellan delarna
     enc = subprocess.Popen(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-f', 'rawvideo', '-pix_fmt', 'bgr24', '-s', f'{W}x{H}', '-r', str(fps),
                             '-i', '-', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '18', '-preset', 'medium', '-movflags', '+faststart', out], stdin=subprocess.PIPE)
-    written = 0; buf = []; prev_kind = None; bounds = []
+    written = 0; buf = []; prev_kind = None; bounds = []; aligned = []
     def write(frames):
         nonlocal written
         for f in frames: enc.stdin.write(f.tobytes()); written += 1
     for j, (kind, _) in enumerate(parts):
         frames = frames_of(j); dissolve = j in tona_before
         if buf:
+            if len(buf) > 2 and len(frames) > 2:
+                tl, frames, r = align_seam(buf, list(frames))
+                if r: buf = tl; aligned.append(r)
             key = 'övertoning' if dissolve else f'{prev_kind if prev_kind != "still" else "ai"}→{kind if kind != "still" else "ai"}'
             L = min(OVERLAP.get(key, 4), len(buf) - 1, len(frames) // 2)
             if L > 0:
@@ -175,4 +265,6 @@ def assemble(meta, work, clips, play, cuts, keys_in, keys_out, out, fps=30, size
         prev_kind = kind
     write(buf); enc.stdin.close(); enc.wait()
     if bounds_json: json.dump(bounds, open(bounds_json, 'w'))
+    if aligned: print(f'{len(aligned)} skarvar inriktade (största zoom {max(abs(a[0] - 1) for a in aligned) * 100:.1f} %, '
+                      f'största förskjutning {max(np.hypot(*a[2]) for a in aligned):.0f} px)')
     return written

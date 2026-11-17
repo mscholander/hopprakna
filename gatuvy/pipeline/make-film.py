@@ -179,38 +179,17 @@ def main():
     with cf.ThreadPoolExecutor(a.jobs) as ex: clips = list(ex.map(clip, range(len(keys) - 1)))
     print(f'{len(clips)} klipp klara, {time.time() - t0:.0f} s')
 
-    # 3. foga ihop. Varje klipp görs först om till samma format och rätt längd (första bildrutan tas bort,
-    #    den är samma som förra klippets sista), sedan läggs delarna efter varandra utan omkodning.
+    # 3. foga ihop (assemble.py): överlappande övergångar så att rörelsen aldrig stannar, och svängar som får
+    #    samma skärpa och färg som AI-klippen intill.
     out = a.out or os.path.join(a.work, f'film_{tag}_{label}.mp4')
-    W, H = meta.get('size', [1280, 720]); H -= H % 2
-    def frames_in(c):
-        return int(subprocess.run(['ffprobe', '-v', 'error', '-count_frames', '-select_streams', 'v', '-show_entries', 'stream=nb_read_frames', '-of', 'csv=p=0', c],
-                                  capture_output=True, text=True).stdout.strip() or 0)
-    def part(i):
-        dst = os.path.join(d, f'part_{i:04d}_{label}.ts'); c = clips[i]; secs = play[i] if (a.speed or a.clip_seconds) else 0
-        enc = ['-r', str(a.fps), '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '18', '-preset', 'veryfast', '-an', '-f', 'mpegts', dst]
-        base = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y']
-        if c is None:   # klippet gick inte att generera: vanlig övertoning mellan de två fotona i stället
-            t = secs or 2.7; kd = d if a.enhance else a.work; k0, k1 = os.path.join(kd, keys_out[i]), os.path.join(kd, keys[i + 1])
-            subprocess.run(base + ['-loop', '1', '-t', f'{t}', '-i', k0, '-loop', '1', '-t', f'{t}', '-i', k1, '-filter_complex',
-                                   f'[0]scale={W}:{H},fps={a.fps}[x];[1]scale={W}:{H},fps={a.fps}[y];[x][y]xfade=transition=fade:duration={t}:offset=0'] + enc, check=True)
-            return dst
-        nb = frames_in(c); pts = f'setpts=N*{secs / max(1, nb - 1):.6f}/TB' if secs else f'setpts=N/({a.fps}*TB)'
-        vf = f'{pts},fps={a.fps},scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H}' + (',trim=start_frame=1,setpts=PTS-STARTPTS' if i else '')
-        subprocess.run(base + ['-i', c, '-vf', vf] + enc, check=True)
-        return dst
-    with cf.ThreadPoolExecutor(4) as ex: clip_parts = list(ex.map(part, range(len(clips))))
-    # färdiga svängklipp (kameran vrids inuti 360°-bilden) läggs in efter klippet som leder fram till bilden
-    parts = []
-    for i, cp in enumerate(clip_parts):
-        parts.append(cp); pre = meta['frames'][i + 1].get('pre')
-        if pre:
-            dst = os.path.join(d, f'turn_{i + 1:04d}_{label}.ts')
-            subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-i', os.path.join(a.work, pre), '-vf', f'fps={a.fps},scale={W}:{H}',
-                            '-r', str(a.fps), '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '18', '-preset', 'veryfast', '-an', '-f', 'mpegts', dst], check=True)
-            parts.append(dst)
-    lst = os.path.join(d, f'parts_{label}.txt'); open(lst, 'w').write(''.join(f"file '{os.path.abspath(p)}'\n" for p in parts))
-    subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-f', 'concat', '-safe', '0', '-i', lst, '-c', 'copy', '-movflags', '+faststart', out], check=True)
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('asm', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assemble.py'))
+    asm = importlib.util.module_from_spec(spec); spec.loader.exec_module(asm)
+    kd = d if a.enhance else a.work
+    n_out = asm.assemble(meta, a.work, clips, [p or 2.7 for p in play], set(cuts),
+                         [os.path.join(kd, k) for k in keys], [os.path.join(kd, k) for k in keys_out], out, fps=a.fps,
+                         bounds_json=os.path.splitext(out)[0] + '_skarvar.json')
+    print(f'{n_out} bildrutor ({n_out / a.fps:.1f} s)')
     # fotograferna ska anges (bilderna är öppet licensierade)
     names = sorted({f.get('credit', '') for f in meta['frames'] if f.get('credit')})
     open(os.path.splitext(out)[0] + '_credits.txt', 'w').write('Gatubilder:\n' + '\n'.join('  © ' + n for n in names) + '\n')
